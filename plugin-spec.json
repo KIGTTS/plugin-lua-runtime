@@ -1,8 +1,8 @@
 {
   "id": "runtime.lua",
   "name": "插件编辑器",
-  "version": "0.9.1",
-  "versionCode": 5,
+  "version": "0.9.2",
+  "versionCode": 6,
   "entryClass": "com.kigtts.engines.lua.LuaRuntimePlugin",
   "apiVersion": 11,
   "minSdk": 26,
@@ -18,10 +18,10 @@
     "stickers-write"
   ],
   "permissionPurposes": {
-    "app-control": "按用户任务调整应用设置、提交字幕及调试用户授权的Lua插件。",
-    "quick-text-read": "读取用户指定的快捷文本、分组及页面文件以编辑和验收。",
-    "quick-text-write": "创建、编辑、导入导出用户授权的快捷文本与页面。",
-    "stickers-read": "读取用户指定的拍立得、贴纸或图片用于对话和制作。",
-    "stickers-write": "制作、整理用户授权的贴纸与拍立得。"
+    "app-control": "按你的要求调整软件设置、发送字幕，或调试已授权的 Lua 插件。",
+    "quick-text-read": "读取你选择的快捷文本、分组和网页文件，以便整理或编辑。",
+    "quick-text-write": "按你的要求创建、修改、导入和导出快捷文本及网页。",
+    "stickers-read": "读取你选择的照片和贴纸，用于对话或创作。",
+    "stickers-write": "按你的要求制作、修改和整理照片与贴纸。"
   }
 }
