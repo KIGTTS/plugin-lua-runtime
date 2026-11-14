@@ -53,7 +53,7 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
         globals.get("string").set("find", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs = find.invoke(LuaValue.varargsOf(arrayOf(args.arg1(), args.arg(2), args.arg(3), LuaValue.TRUE)))
         })
-        globals.set("host", host(project, method == "execute", coroutine, budget, globals, sourceDirectory))
+        globals.set("host", host(project, method == "execute", coroutine, budget, globals, sourceDirectory, context.locale))
         val prototype = compile(sourceDirectory.resolve("main.lua").readText(Charsets.UTF_8))
         try {
             val exports = LuaClosure(prototype, globals).call().checktable()
@@ -70,7 +70,7 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
         require(bytes.size in 1..LuaSourceStore.SOURCE_LIMIT && bytes.first() != 27.toByte() && bytes.none { it == 0.toByte() }) { "只允许 UTF-8 源代码" }
         return LuaC.instance.compile(ByteArrayInputStream(bytes), name)
     }
-    private fun host(project: LuaProject, writable: Boolean, coroutine: CoroutineContext, budget: BudgetDebug, globals: Globals, sourceDirectory: File): LuaTable {
+    private fun host(project: LuaProject, writable: Boolean, coroutine: CoroutineContext, budget: BudgetDebug, globals: Globals, sourceDirectory: File, locale: String): LuaTable {
         val permissions = project.manifest.permissions
         val data = store.data(project.manifest.id)
         val assets = sourceDirectory.resolve("assets")
@@ -94,7 +94,28 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
             is JsonArray -> JsonArray(json.map(::rewriteResources))
             else -> json
         }
+        val strings by lazy { PluginStrings.fromAssets(assets) }
         return LuaTable().also { host ->
+            host.set("t", function { args ->
+                val key = args.checkjstring(1)
+                require(key.length in 1..160)
+                val values = linkedMapOf<String, String>()
+                if (!args.isnoneornil(2)) {
+                    val table = args.checktable(2)
+                    var index = LuaValue.NIL
+                    while (true) {
+                        val item = table.next(index)
+                        index = item.arg1()
+                        if (index.isnil()) break
+                        require(values.size < 32)
+                        val name = index.checkjstring()
+                        val value = item.arg(2).checkjstring()
+                        require(name.length in 1..80 && value.length <= 1000)
+                        values[name] = value
+                    }
+                }
+                LuaValue.valueOf(strings.text(key, locale, values, args.optjstring(3, key)).take(16000))
+            })
             host.set("module", function { args ->
                 val name = args.checkjstring(1)
                 require(name.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*){0,7}")) && name.length <= 80) { "无效模块名" }

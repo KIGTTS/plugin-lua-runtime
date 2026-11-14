@@ -2,6 +2,8 @@ package com.kigtts.engines.lua
 
 import com.kigtts.plugin.api.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -10,7 +12,7 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.2")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.3")
     private lateinit var environment: PluginEnvironment
     private lateinit var store: LuaSourceStore
     private lateinit var executor: LuaExecutor
@@ -19,13 +21,15 @@ class LuaRuntimePlugin : KigPlugin {
     private val revisions = MutableStateFlow(0L)
     override val uiChanges get() = revisions
     private data class Ui(val contributions: PluginContributions, val pages: List<PluginPage>)
+    @Volatile private var uiLocale = "zh-CN"
     private val ui = linkedMapOf<String, Ui>()
     private val transient = LinkedHashMap<String, PluginPage>(16, .75f, true)
     private val deletes = mutableMapOf<String, Pair<LuaDraft, List<String>>>()
     private val reviews = mutableMapOf<String, LuaPending>()
     override suspend fun attach(environment: PluginEnvironment) {
         this.environment = environment; store = LuaSourceStore(environment.storage); executor = LuaExecutor(environment, store); files = LuaDraftFiles(environment.storage, store)
-        for (project in store.projects().filter { it.enabled }) refresh(project, PluginContext("", ""))
+        uiLocale = environment.locale
+        for (project in store.projects().filter { it.enabled }) refresh(project, PluginContext("", "", locale = uiLocale))
     }
     override val contributions: PluginContributions get() = synchronized(ui) {
         PluginContributions(actions = ui.values.flatMap { it.contributions.actions },
@@ -34,6 +38,17 @@ class LuaRuntimePlugin : KigPlugin {
             managedPackages = store.projects().map { ManagedPackage(it.manifest.id, it.manifest.version, "lua", it.enabled, it.manifest.name, it.manifest.permissions, it.manifest.permissionPurposes, "project/${it.manifest.id}", "manage-enable/${it.manifest.id}", "manage-remove/${it.manifest.id}", it.error) },
             settingsEntries = listOf(SettingsEntry("editor", "插件编辑器", "manager", PluginIcon.EDIT,
                 cardId = "developer", cardTitle = "开发工具", summary = "项目、文件与打包")) + ui.values.flatMap { it.contributions.settingsEntries })
+    }
+    override fun contributions(context: PluginContext): PluginContributions {
+        if (uiLocale != context.locale) runBlocking(Dispatchers.Default) {
+            mutex.withLock {
+                if (uiLocale != context.locale) {
+                    for (project in store.projects().filter { it.enabled }) refresh(project, context)
+                    uiLocale = context.locale
+                }
+            }
+        }
+        return contributions
     }
     override fun page(pageId: String, context: PluginContext): PluginPage? = when {
         pageId == "manager" -> LuaRuntimePages.manager(store.projects())

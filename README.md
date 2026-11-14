@@ -16,3 +16,6 @@ cd plugin-lua-runtime
 Linux/macOS使用`./gradlew`。编译产物在`build/outputs/aar`，签名插件包在`build/plugin-packages`。发布私钥始终由维护者保管，不提交到本仓库；正式更新沿用既有发布者签名、插件ID与Appdata范围。已发布版本不可覆盖，发行新内容须增加版本号。
 
 [SDK与接口](https://github.com/KIGTTS/plugin-sdk) · [官方源](https://modelscope.cn/datasets/LHTSTUDIO/KIGTTS-Official-Plugins)
+## 0.9.3 · 本地化
+
+Lua 工具可使用与原生插件一致的 `assets/i18n/*.json`。用 `ctx.locale` 取语言标签，或直接调用 `host.t("key", { name = "KIGTTS" }, "备用文案")`。切换界面语言后自动刷新已启用工具的入口和页面，不会重复执行动作，也不修改现有工具数据。

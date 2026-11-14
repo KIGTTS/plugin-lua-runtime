@@ -50,6 +50,29 @@ class LuaRuntimeTest {
         assertEquals("module/example/hello", plugin.contributions.actions.single().id)
         assertEquals(PluginOutcome.Message("完成"), plugin.execute("module/example/hello", PluginContext("", "")))
     }
+    @Test fun signedAssetsProvideBothTonesToLuaUiAndActions() = runBlocking {
+        val environment = environment()
+        val directory = packageDirectory(environment, """
+            return {
+              contributions=function(ctx) return {actions={{id='hello',label=host.t('title'),slot='EDITOR_TOP_END',icon='INFO'}}} end,
+              pages=function(ctx) return {{id='main',title=host.t('title')}} end,
+              execute=function(action,ctx) return {type='message',text=host.t('greeting',{name='KIGTTS'})} end
+            }
+        """.trimIndent())
+        val i18n = directory.resolve("assets/i18n").apply { mkdirs() }
+        i18n.resolve("zh-CN.json").writeText("""{"title":"问候","greeting":"你好，{name}"}""")
+        i18n.resolve("zh-CN-x-casual.json").writeText("""{"title":"打招呼","greeting":"你好呀，{name}"}""")
+        LuaSourceStore(environment.storage).let { it.confirm(it.stage(directory)) }
+        val plugin = LuaRuntimePlugin()
+        plugin.attach(environment)
+        val context = PluginContext("", "", locale = "zh-CN-x-casual")
+        assertEquals("问候", plugin.contributions.actions.single().label)
+        assertEquals("打招呼", plugin.contributions(context).actions.single().label)
+        assertEquals("打招呼", plugin.page("module/example/main", context)?.title)
+        assertEquals(PluginOutcome.Message("你好呀，KIGTTS"), plugin.execute("module/example/hello", context))
+        assertEquals("问候", plugin.contributions(context.copy(locale = "zh-CN")).actions.single().label)
+    }
+
     @Test fun syntaxValidationDoesNotRunTopLevelLoop() {
         val environment = environment(); val store = LuaSourceStore(environment.storage)
         LuaExecutor(environment, store).validate("while true do end")
