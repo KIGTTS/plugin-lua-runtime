@@ -12,7 +12,11 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.3")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.4")
+    override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
+    private var strings = PluginStrings(emptyMap())
+    private fun copy(key: String) = strings.text(key, uiLocale)
+    private val pages get() = LuaRuntimePages { key, values -> strings.text(key, uiLocale, values) }
     private lateinit var environment: PluginEnvironment
     private lateinit var store: LuaSourceStore
     private lateinit var executor: LuaExecutor
@@ -28,16 +32,17 @@ class LuaRuntimePlugin : KigPlugin {
     private val reviews = mutableMapOf<String, LuaPending>()
     override suspend fun attach(environment: PluginEnvironment) {
         this.environment = environment; store = LuaSourceStore(environment.storage); executor = LuaExecutor(environment, store); files = LuaDraftFiles(environment.storage, store)
+        strings = PluginStrings.fromAssets(environment.assets)
         uiLocale = environment.locale
         for (project in store.projects().filter { it.enabled }) refresh(project, PluginContext("", "", locale = uiLocale))
     }
     override val contributions: PluginContributions get() = synchronized(ui) {
         PluginContributions(actions = ui.values.flatMap { it.contributions.actions },
-            drawerEntries = listOf(DrawerEntry("manager", "插件编辑器", "manager", PluginIcon.EDIT)) + ui.values.flatMap { it.contributions.drawerEntries },
+            drawerEntries = listOf(DrawerEntry("manager", copy("title"), "manager", PluginIcon.EDIT)) + ui.values.flatMap { it.contributions.drawerEntries },
             automationActions = listOf("import", "agent-install", "agent"),
             managedPackages = store.projects().map { ManagedPackage(it.manifest.id, it.manifest.version, "lua", it.enabled, it.manifest.name, it.manifest.permissions, it.manifest.permissionPurposes, "project/${it.manifest.id}", "manage-enable/${it.manifest.id}", "manage-remove/${it.manifest.id}", it.error) },
-            settingsEntries = listOf(SettingsEntry("editor", "插件编辑器", "manager", PluginIcon.EDIT,
-                cardId = "developer", cardTitle = "开发工具", summary = "项目、文件与打包")) + ui.values.flatMap { it.contributions.settingsEntries })
+            settingsEntries = listOf(SettingsEntry("editor", copy("title"), "manager", PluginIcon.EDIT,
+                cardId = "developer", cardTitle = copy("developer"), summary = copy("summary"))) + ui.values.flatMap { it.contributions.settingsEntries })
     }
     override fun contributions(context: PluginContext): PluginContributions {
         if (uiLocale != context.locale) runBlocking(Dispatchers.Default) {
@@ -51,15 +56,15 @@ class LuaRuntimePlugin : KigPlugin {
         return contributions
     }
     override fun page(pageId: String, context: PluginContext): PluginPage? = when {
-        pageId == "manager" -> LuaRuntimePages.manager(store.projects())
+        pageId == "manager" -> pages.manager(store.projects())
         pageId.startsWith("module/") -> synchronized(ui) { ui.values.flatMap { it.pages }.firstOrNull { it.id == pageId } }
         else -> synchronized(transient) { transient[pageId] }
     }
     override suspend fun execute(actionId: String, context: PluginContext): PluginOutcome = mutex.withLock {
         try { perform(actionId, context).also { revisions.value++ } }
         catch (cancel: CancellationException) { throw cancel }
-        catch (budget: LuaBudgetExceeded) { PluginOutcome.Message(budget.message ?: "工具运行超时") }
-        catch (failure: Exception) { PluginOutcome.Message(failure.message?.take(250) ?: "操作失败") }
+        catch (budget: LuaBudgetExceeded) { PluginOutcome.Message(budget.message ?: copy("timeout")) }
+        catch (failure: Exception) { PluginOutcome.Message(failure.message?.take(250) ?: copy("failure")) }
     }
     private suspend fun agent(context: PluginContext): PluginOutcome {
         val operation = context.inputs["operation"].orEmpty()
@@ -161,22 +166,22 @@ class LuaRuntimePlugin : KigPlugin {
                 executor.validate(pending.directory.resolve("main.lua").readText(Charsets.UTF_8))
                 val project = store.confirm(pending); synchronized(transient) { transient.remove("review/$id") }
                 reviews.remove(id)
-                refresh(project, context); open(LuaRuntimePages.project(store.project(project.manifest.id)))
+                refresh(project, context); open(pages.project(store.project(project.manifest.id)))
             }
-            "review-files" -> open(LuaRuntimePages.files(files.inspect(reviews[id] ?: error("检查页面已更新")), files))
+            "review-files" -> open(pages.files(files.inspect(reviews[id] ?: error("检查页面已更新")), files))
             "review-export" -> (reviews[id] ?: error("检查页面已更新")).let { pending ->
                 PluginOutcome.ExportResource("完整源代码", PluginResource(pending.directory.resolve("main.lua").relativeTo(environment.storage.root).invariantSeparatorsPath), "main.lua", "text/plain")
             }
-            "project" -> open(LuaRuntimePages.project(store.project(id)))
+            "project" -> open(pages.project(store.project(id)))
             "enable" -> {
                 val project = store.project(id)
                 if (!project.enabled) {
                     require(context.inputs["_callerPlugin"] == null) { "请在工具页面手动启用" }
                     store.verify(project); store.enabled(id, true); refresh(store.project(id), context)
                 } else { store.enabled(id, false); synchronized(ui) { ui.remove(id) } }
-                open(LuaRuntimePages.project(store.project(id)))
+                open(pages.project(store.project(id)))
             }
-            "delete" -> open(LuaRuntimePages.delete(store.project(id)))
+            "delete" -> open(pages.delete(store.project(id)))
             "delete-confirm" -> {
                 require(context.inputs["_callerPlugin"] == null); store.remove(id); synchronized(ui) { ui.remove(id) }
                 synchronized(transient) { transient.entries.removeAll { it.value.id == "project/$id" || it.value.id == "delete/$id" } }
@@ -188,26 +193,26 @@ class LuaRuntimePlugin : KigPlugin {
                 val value = executor.call(project, "test", context)
                 PluginOutcome.Dialog("测试结果", if (value == JsonNull) "语法和页面合同检查通过；未提供 test(ctx) 函数。" else value.toString().take(16000))
             }
-            "files" -> open(LuaRuntimePages.files(files.create(id), files))
+            "files" -> open(pages.files(files.create(id), files))
             "file-open" -> files.session(id).let { draft ->
                 val path = requireNotNull(context.inputs["path"]); val file = if (path.isEmpty()) files.directory(draft, "") else files.file(draft, path)
-                if (file.isDirectory) { draft.directory = path; open(LuaRuntimePages.files(draft, files)) }
+                if (file.isDirectory) { draft.directory = path; open(pages.files(draft, files)) }
                 else {
                     require(file.isFile && file.length() <= LuaSourceStore.SOURCE_LIMIT && file.readBytes().none { it == 0.toByte() }) { "请选择较小的文本文件" }
                     val source = file.readText(Charsets.UTF_8); require(source.length <= 64000) { "此文件较大，请导出后编辑" }
-                    draft.editing = path; open(LuaRuntimePages.editor(draft, files))
+                    draft.editing = path; open(pages.editor(draft, files))
                 }
             }
             "file-parent" -> files.session(id).let { draft ->
                 val next = context.inputs["directory"] ?: draft.directory.substringBeforeLast('/', "")
-                files.directory(draft, next); draft.directory = next; open(LuaRuntimePages.files(draft, files))
+                files.directory(draft, next); draft.directory = next; open(pages.files(draft, files))
             }
             "file-operation" -> operation(files.session(id), context)
             "file-delete" -> {
                 val (draft, paths) = deletes.remove(id) ?: error("确认已失效")
-                require(context.inputs["_callerPlugin"] == null); files.delete(draft, paths); open(LuaRuntimePages.files(draft, files))
+                require(context.inputs["_callerPlugin"] == null); files.delete(draft, paths); open(pages.files(draft, files))
             }
-            "file-write" -> files.session(id).let { draft -> files.write(draft, context.inputs["value"].orEmpty()); cache(LuaRuntimePages.editor(draft, files)); PluginOutcome.RefreshUi }
+            "file-write" -> files.session(id).let { draft -> files.write(draft, context.inputs["value"].orEmpty()); cache(pages.editor(draft, files)); PluginOutcome.RefreshUi }
             "file-import" -> files.session(id).let { draft ->
                 context.inputs["directory"]?.let { draft.directory = it }
                 PluginOutcome.ImportResource("导入资源", "imports/files", "file-imported/$id", multiple = true)
@@ -215,7 +220,7 @@ class LuaRuntimePlugin : KigPlugin {
             "file-imported" -> files.session(id).let { draft ->
                 val resources = context.inputs["resourcePaths"]?.let { PluginJson.decodeFromString<List<String>>(it) }
                     ?: listOf(requireNotNull(context.inputs["resourcePath"]))
-                files.import(draft, resources.map(environment.storage::file)); open(LuaRuntimePages.files(draft, files))
+                files.import(draft, resources.map(environment.storage::file)); open(pages.files(draft, files))
             }
             "file-new" -> files.session(id).let { draft ->
                 context.inputs["directory"]?.let { draft.directory = it }
@@ -223,14 +228,14 @@ class LuaRuntimePlugin : KigPlugin {
             }
             "file-folder" -> PluginOutcome.TextInput("文件夹名称", "file-folder-name/$id")
             "file-text" -> PluginOutcome.TextInput("文件名称", "file-text-name/$id")
-            "file-folder-name", "file-text-name" -> files.session(id).let { draft -> files.create(draft, context.inputs["value"].orEmpty(), action == "file-folder-name"); open(LuaRuntimePages.files(draft, files)) }
+            "file-folder-name", "file-text-name" -> files.session(id).let { draft -> files.create(draft, context.inputs["value"].orEmpty(), action == "file-folder-name"); open(pages.files(draft, files)) }
             "validate" -> files.session(id).let { draft ->
                 require(draft.editing.endsWith(".lua")); executor.validate(files.file(draft, draft.editing).readText(Charsets.UTF_8)); PluginOutcome.Message("语法检查通过")
             }
             "draft-review" -> files.session(id).let { draft -> review(files.review(draft)).also { files.close(draft); synchronized(transient) { transient.remove("draft/$id"); transient.remove("edit/$id") } } }
             "draft-close" -> files.session(id).let { draft -> files.close(draft); synchronized(transient) { transient.remove("draft/$id"); transient.remove("edit/$id") }
-                draft.reviewOf?.let { token -> review(reviews[token] ?: error("检查页面已更新")) } ?: open(LuaRuntimePages.project(store.project(draft.projectId))) }
-            "draft-back" -> open(LuaRuntimePages.files(files.session(id), files))
+                draft.reviewOf?.let { token -> review(reviews[token] ?: error("检查页面已更新")) } ?: open(pages.project(store.project(draft.projectId))) }
+            "draft-back" -> open(pages.files(files.session(id), files))
             "module" -> {
                 val module = id.substringBefore('/'); val command = id.substringAfter('/')
                 val project = store.project(module); require(project.enabled) { "工具已停用" }
@@ -289,7 +294,7 @@ class LuaRuntimePlugin : KigPlugin {
         previous.forEach { old -> reviews.remove(old.token); synchronized(transient) { transient.remove("review/${old.token}") }; old.directory.deleteRecursively() }
         require(reviews.size < 8 || pending.token in reviews) { "请先完成其它工具的检查" }
         reviews[pending.token] = pending
-        return open(LuaRuntimePages.review(pending, store.projects().firstOrNull { it.manifest.id == pending.manifest.id }))
+        return open(pages.review(pending, store.projects().firstOrNull { it.manifest.id == pending.manifest.id }))
     }
     private fun create(name: String): PluginOutcome {
         require(name.length in 1..64)
@@ -302,9 +307,9 @@ class LuaRuntimePlugin : KigPlugin {
     private fun operation(draft: LuaDraft, context: PluginContext): PluginOutcome {
         val paths = PluginJson.decodeFromString<List<String>>(requireNotNull(context.inputs["paths"]))
         return when (context.inputs["op"]) {
-            "move" -> { files.move(draft, paths, context.inputs["destination"].orEmpty()); open(LuaRuntimePages.files(draft, files)) }
-            "copy" -> { files.copy(draft, paths, context.inputs["destination"].orEmpty()); open(LuaRuntimePages.files(draft, files)) }
-            "rename" -> { require(paths.size == 1); files.rename(draft, paths.single(), context.inputs["destination"].orEmpty()); open(LuaRuntimePages.files(draft, files)) }
+            "move" -> { files.move(draft, paths, context.inputs["destination"].orEmpty()); open(pages.files(draft, files)) }
+            "copy" -> { files.copy(draft, paths, context.inputs["destination"].orEmpty()); open(pages.files(draft, files)) }
+            "rename" -> { require(paths.size == 1); files.rename(draft, paths.single(), context.inputs["destination"].orEmpty()); open(pages.files(draft, files)) }
             "delete" -> {
                 require(paths.isNotEmpty()); val token = UUID.randomUUID().toString(); deletes[token] = draft to paths
                 open(PluginPage("file-delete/$token", "删除文件", listOf(PageBlock.Notice("删除所选的 ${paths.size} 个项目？"),
