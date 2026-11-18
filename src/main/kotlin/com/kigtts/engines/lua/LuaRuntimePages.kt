@@ -9,7 +9,7 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
             PageAction("choose", copy("import"), PluginIcon.ADD), PageAction("create", copy("new"), PluginIcon.EDIT))))),
         PageBlock.Group(copy("build"), listOf(PageBlock.Actions(listOf(PageAction("native-builder", copy("java"), PluginIcon.TEXT))))),
     ), ManagementList("lua-projects", projects.map { project ->
-        ManagementItem(project.manifest.id, project.manifest.name, project.error.ifEmpty { project.manifest.version }, PluginIcon.TEXT,
+        ManagementItem(project.manifest.id, project.manifest.name, if (project.error.isEmpty()) project.manifest.version else copy("dialog.project_failed"), PluginIcon.TEXT,
             primaryAction = "project/${project.manifest.id}", toggle = ManagementToggle(project.enabled, "enable/${project.manifest.id}"))
     }, emptyText = copy("empty")))
     fun project(project: LuaProject) = PluginPage("project/${project.manifest.id}", project.manifest.name, listOf(
@@ -21,7 +21,7 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
                 PageAction("delete/${project.manifest.id}", copy("delete"), PluginIcon.CLOSE))),
         )),
         PageBlock.Group(copy("permissions"), listOf(PageBlock.Text(permissions(project.manifest)))),
-    ) + if (project.error.isNotEmpty()) listOf(PageBlock.Notice(project.error)) else emptyList())
+    ) + if (project.error.isNotEmpty()) listOf(PageBlock.Notice(copy("dialog.project_failed"))) else emptyList())
     fun review(pending: LuaPending, previous: LuaProject?) = PluginPage("review/${pending.token}", if (previous == null) copy("install") else copy("update"), listOf(
         PageBlock.Group(pending.manifest.name, listOf(PageBlock.Text(copy("version", "version" to pending.manifest.version)), PageBlock.Text(permissions(pending.manifest)),
             PageBlock.Notice(copy("review")))),
@@ -46,7 +46,7 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
         PageBlock.Actions(listOf(PageAction("validate/${draft.token}", copy("syntax"), PluginIcon.TEXT),
             PageAction("draft-review/${draft.token}", copy("save"), PluginIcon.ADD), PageAction("draft-back/${draft.token}", copy("files"), PluginIcon.MENU))),
     ))
-    private fun permissions(manifest: LuaManifest): String = manifest.permissions.joinToString("、") {
+    private fun permissions(manifest: LuaManifest): String = manifest.permissions.joinToString(copy("list.separator")) {
         when (it) { "app-control" -> copy("control"); "quick-text-read" -> copy("read"); "quick-text-write" -> copy("write"); else -> it }
     }.ifEmpty { copy("noPermission") }
 }

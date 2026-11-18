@@ -38,22 +38,22 @@ class LuaSourceStore(private val storage: PluginStorage) {
         }.onFailure { records.clear() }
     }
     @Synchronized fun projects() = records.values.toList()
-    @Synchronized fun project(id: String) = records[id] ?: error("工具不存在")
+    @Synchronized fun project(id: String) = records[id] ?: throw LuaEditorIssue("issue.project_missing", "工具不存在")
     fun code(id: String) = storage.directory("projects/${safeId(id)}/code")
     fun data(id: String) = PluginStorage(storage.directory("projects/${safeId(id)}/data"))
     fun source(id: String): String = utf8(code(id).resolve("main.lua").readBytes())
-    fun verify(project: LuaProject) { require(hash(code(project.manifest.id)) == project.hash) { "源文件已变化，需要重新导入并确认" } }
+    fun verify(project: LuaProject) { require(hash(code(project.manifest.id)) == project.hash) { throw LuaEditorIssue("issue.reimport", "源文件已变化，需要重新导入并确认") } }
     fun stage(source: File): LuaPending {
-        require(source.canonicalFile.toPath().startsWith(storage.root.canonicalFile.toPath())) { "资源不属于 Lua 插件" }
+        require(source.canonicalFile.toPath().startsWith(storage.root.canonicalFile.toPath())) { throw LuaEditorIssue("issue.owner", "资源不属于 Lua 插件") }
         val token = UUID.randomUUID().toString()
         val target = storage.directory("staging/$token")
         try {
             if (source.isDirectory) copyPackage(source, target) else unzip(source, target)
             val manifestFile = target.resolve("manifest.json")
-            require(manifestFile.isFile && manifestFile.length() <= 16 * 1024) { "缺少有效 manifest.json" }
+            require(manifestFile.isFile && manifestFile.length() <= 16 * 1024) { throw LuaEditorIssue("issue.manifest", "缺少有效 manifest.json") }
             val parsed = manifest(PluginJson.parseToJsonElement(utf8(manifestFile.readBytes())).jsonObject)
             val script = target.resolve("main.lua")
-            require(script.isFile && script.length() in 1..SOURCE_LIMIT.toLong()) { "main.lua 为空或超过 256 KiB" }
+            require(script.isFile && script.length() in 1..SOURCE_LIMIT.toLong()) { throw LuaEditorIssue("issue.script_size", "main.lua 为空或超过 256 KiB") }
             utf8(script.readBytes()) // Reject bytecode/invalid UTF-8 without execution.
             return LuaPending(token, parsed, hash(target), target)
         } catch (failure: Throwable) { target.deleteRecursively(); throw failure }
@@ -61,19 +61,19 @@ class LuaSourceStore(private val storage: PluginStorage) {
     fun pending(token: String): LuaPending {
         require(UUID.fromString(token).toString() == token)
         val dir = storage.file("staging/$token")
-        require(dir.isDirectory) { "待确认工具不存在" }
+        require(dir.isDirectory) { throw LuaEditorIssue("issue.pending_missing", "待确认工具不存在") }
         return LuaPending(token, manifest(PluginJson.parseToJsonElement(utf8(dir.resolve("manifest.json").readBytes())).jsonObject), hash(dir), dir)
     }
     @Synchronized fun confirm(pending: LuaPending): LuaProject {
-        require(hash(pending.directory) == pending.hash) { "源文件已变化，请重新检查" }
-        require(records.size < 32 || pending.manifest.id in records) { "最多可安装 32 个 Lua 工具" }
+        require(hash(pending.directory) == pending.hash) { throw LuaEditorIssue("issue.source_changed", "源文件已变化，请重新检查") }
+        require(records.size < 32 || pending.manifest.id in records) { throw LuaEditorIssue("issue.project_limit", "最多可安装 32 个 Lua 工具") }
         val project = storage.directory("projects/${pending.manifest.id}")
         val code = project.resolve("code")
         val old = project.resolve("old-code")
         old.deleteRecursively()
-        if (code.exists()) require(code.renameTo(old)) { "不能备份旧版本" }
+        if (code.exists()) require(code.renameTo(old)) { throw LuaEditorIssue("issue.backup_failed", "不能备份旧版本") }
         try {
-            require(pending.directory.renameTo(code)) { "不能保存工具" }
+            require(pending.directory.renameTo(code)) { throw LuaEditorIssue("issue.save_failed", "不能保存工具") }
             val installed = LuaProject(pending.manifest, true, pending.hash)
             records[pending.manifest.id] = installed
             save()
@@ -91,7 +91,7 @@ class LuaSourceStore(private val storage: PluginStorage) {
     }
     fun edit(id: String, source: String): LuaPending {
         val bytes = source.toByteArray(Charsets.UTF_8)
-        require(bytes.size in 1..SOURCE_LIMIT) { "源文件不能超过 256 KiB" }
+        require(bytes.size in 1..SOURCE_LIMIT) { throw LuaEditorIssue("issue.source_size", "源文件不能超过 256 KiB") }
         utf8(bytes)
         val draft = storage.directory("drafts/${UUID.randomUUID()}")
         copyPackage(code(id), draft)
@@ -110,36 +110,36 @@ class LuaSourceStore(private val storage: PluginStorage) {
     }
     private fun copyPackage(source: File, target: File) {
         val files = source.walkTopDown().filter { it != source }.toList()
-        require(files.size <= FILE_LIMIT) { "文件过多" }
+        require(files.size <= FILE_LIMIT) { throw LuaEditorIssue("issue.file_count", "文件过多") }
         var total = 0L
         val paths = hashSetOf<String>()
         files.forEach { file ->
-            require(file.canonicalFile.toPath().startsWith(source.canonicalFile.toPath())) { "不允许外部链接" }
+            require(file.canonicalFile.toPath().startsWith(source.canonicalFile.toPath())) { throw LuaEditorIssue("issue.external_link", "不允许外部链接") }
             val path = safePath(file.relativeTo(source).invariantSeparatorsPath)
-            require(paths.add(path.lowercase())) { "文件名重复" }
+            require(paths.add(path.lowercase())) { throw LuaEditorIssue("issue.duplicate_file", "文件名重复") }
             if (file.isDirectory) target.resolve(path).mkdirs() else {
-                total += file.length(); require(total <= TOTAL_LIMIT && file.length() <= 8 * 1024 * 1024L) { "资源过大" }
+                total += file.length(); require(total <= TOTAL_LIMIT && file.length() <= 8 * 1024 * 1024L) { throw LuaEditorIssue("issue.resource_size", "资源过大") }
                 target.resolve(path).also { it.parentFile.mkdirs(); file.copyTo(it) }
             }
         }
     }
     private fun unzip(source: File, target: File) {
-        require(source.isFile && source.length() <= TOTAL_LIMIT) { "源包不存在或过大" }
+        require(source.isFile && source.length() <= TOTAL_LIMIT) { throw LuaEditorIssue("issue.package_missing", "源包不存在或过大") }
         ZipFile(source).use { archive ->
             val entries = archive.entries().asSequence().toList()
-            require(entries.size <= FILE_LIMIT) { "文件过多" }
+            require(entries.size <= FILE_LIMIT) { throw LuaEditorIssue("issue.file_count", "文件过多") }
             var total = 0L
             val paths = hashSetOf<String>()
             entries.forEach { entry ->
                 val path = safePath(entry.name.trimEnd('/'))
-                require(paths.add(path.lowercase())) { "文件名重复" }
+                require(paths.add(path.lowercase())) { throw LuaEditorIssue("issue.duplicate_file", "文件名重复") }
                 if (entry.isDirectory) target.resolve(path).mkdirs() else {
                     val file = target.resolve(path).also { it.parentFile.mkdirs() }
                     archive.getInputStream(entry).use { input -> file.outputStream().use { output ->
                         val buffer = ByteArray(8192); var bytes = 0L
                         while (true) { val read = input.read(buffer); if (read < 0) break
                             total += read; bytes += read
-                            require(total <= TOTAL_LIMIT && bytes <= 8 * 1024 * 1024L) { "资源过大" }
+                            require(total <= TOTAL_LIMIT && bytes <= 8 * 1024 * 1024L) { throw LuaEditorIssue("issue.resource_size", "资源过大") }
                             output.write(buffer, 0, read)
                         }
                     } }
@@ -148,23 +148,23 @@ class LuaSourceStore(private val storage: PluginStorage) {
         }
     }
     private fun safePath(path: String): String {
-        require(path.isNotBlank() && !path.contains('\\') && !path.contains(':') && !path.contains('\u0000') && !path.startsWith('/')) { "无效资源路径" }
-        require(path.split('/').none { it.isEmpty() || it == "." || it == ".." }) { "路径越界" }
-        require(path == "manifest.json" || path == "main.lua" || path == "assets" || path.startsWith("assets/")) { "只允许 manifest.json、main.lua 与 assets" }
+        require(path.isNotBlank() && !path.contains('\\') && !path.contains(':') && !path.contains('\u0000') && !path.startsWith('/')) { throw LuaEditorIssue("issue.invalid_path", "无效资源路径") }
+        require(path.split('/').none { it.isEmpty() || it == "." || it == ".." }) { throw LuaEditorIssue("issue.outside_path", "路径越界") }
+        require(path == "manifest.json" || path == "main.lua" || path == "assets" || path.startsWith("assets/")) { throw LuaEditorIssue("issue.package_files", "只允许 manifest.json、main.lua 与 assets") }
         return path
     }
     private fun manifest(value: JsonObject): LuaManifest {
         val id = safeId(value.getValue("id").jsonPrimitive.content)
         val name = value.getValue("name").jsonPrimitive.content
         val version = value.getValue("version").jsonPrimitive.content
-        require(name.length in 1..64 && version.length in 1..32) { "名称或版本无效" }
+        require(name.length in 1..64 && version.length in 1..32) { throw LuaEditorIssue("issue.metadata", "名称或版本无效") }
         val permissions = value["permissions"]?.jsonArray?.map { it.jsonPrimitive.content }?.toSet().orEmpty()
-        require(PERMISSIONS.containsAll(permissions)) { "申请了不支持的权限" }
+        require(PERMISSIONS.containsAll(permissions)) { throw LuaEditorIssue("issue.unsupported_permission", "申请了不支持的权限") }
         val purposes = value["permissionPurposes"]?.jsonObject?.mapValues { it.value.jsonPrimitive.content }.orEmpty()
-        require(purposes.size <= permissions.size && purposes.all { (key, text) -> key in permissions && text.length in 1..600 }) { "权限用途声明无效" }
+        require(purposes.size <= permissions.size && purposes.all { (key, text) -> key in permissions && text.length in 1..600 }) { throw LuaEditorIssue("issue.permission_purpose", "权限用途声明无效") }
         return LuaManifest(id, name, version, permissions, purposes)
     }
-    private fun safeId(id: String) = id.also { require(ID.matches(id)) { "无效工具 ID" } }
+    private fun safeId(id: String) = id.also { require(ID.matches(id)) { throw LuaEditorIssue("issue.invalid_id", "无效工具 ID") } }
     private fun hash(directory: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         directory.walkTopDown().filter { it != directory }.sortedBy { it.relativeTo(directory).invariantSeparatorsPath }.forEach { file ->
@@ -185,7 +185,7 @@ class LuaSourceStore(private val storage: PluginStorage) {
     }
     private fun File.resolveSibling(name: String) = File(parentFile, name)
     private fun utf8(bytes: ByteArray): String {
-        require(bytes.none { it == 0.toByte() } && bytes.firstOrNull() != 27.toByte()) { "只接受 UTF-8 源文件" }
+        require(bytes.none { it == 0.toByte() } && bytes.firstOrNull() != 27.toByte()) { throw LuaEditorIssue("issue.utf8", "只接受 UTF-8 源文件") }
         return Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().removePrefix("\uFEFF")
     }
 }

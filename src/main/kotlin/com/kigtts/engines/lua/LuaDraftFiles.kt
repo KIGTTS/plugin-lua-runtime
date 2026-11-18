@@ -14,20 +14,20 @@ class LuaDraftFiles(private val storage: PluginStorage, private val store: LuaSo
     private val sessions = linkedMapOf<String, LuaDraft>()
     @Synchronized fun create(id: String): LuaDraft {
         store.project(id)
-        require(sessions.size < 8) { "请先保存或关闭其它编辑项目" }
+        require(sessions.size < 8) { throw LuaEditorIssue("issue.session_limit", "请先保存或关闭其它编辑项目") }
         val token = UUID.randomUUID().toString()
         val root = storage.directory("drafts/$token")
         store.code(id).copyRecursively(root, overwrite = false)
         return LuaDraft(token, id, root).also { sessions[token] = it }
     }
     @Synchronized fun inspect(pending: LuaPending): LuaDraft {
-        require(sessions.size < 8) { "请先保存或关闭其它编辑项目" }
+        require(sessions.size < 8) { throw LuaEditorIssue("issue.session_limit", "请先保存或关闭其它编辑项目") }
         val token = UUID.randomUUID().toString()
         val root = storage.directory("drafts/$token")
         pending.directory.copyRecursively(root, overwrite = false)
         return LuaDraft(token, pending.manifest.id, root, reviewOf = pending.token).also { sessions[token] = it }
     }
-    @Synchronized fun session(token: String) = sessions[token] ?: error("编辑会话已结束，请重新打开")
+    @Synchronized fun session(token: String) = sessions[token] ?: throw LuaEditorIssue("issue.session_expired", "编辑会话已结束，请重新打开")
     fun file(draft: LuaDraft, path: String): File {
         require(path.isNotEmpty() && path.length <= 240 && !path.startsWith('/') && !path.contains('\\') && !path.contains(':'))
         require(path.split('/').none { it in setOf("", ".", "..") } && !path.contains('\u0000'))
@@ -43,12 +43,12 @@ class LuaDraftFiles(private val storage: PluginStorage, private val store: LuaSo
         require(paths.isNotEmpty() && paths.distinct().size == paths.size)
         val sources = paths.map { protected(draft, it) }
         val folder = directory(draft, destination)
-        require(destination == "assets" || destination.startsWith("assets/")) { "资源只能移入 assets" }
-        require(sources.none { source -> sources.any { it != source && source.toPath().startsWith(it.toPath()) } }) { "不能同时选择目录及其中的文件" }
+        require(destination == "assets" || destination.startsWith("assets/")) { throw LuaEditorIssue("issue.assets_only", "资源只能移入 assets") }
+        require(sources.none { source -> sources.any { it != source && source.toPath().startsWith(it.toPath()) } }) { throw LuaEditorIssue("issue.nested_selection", "不能同时选择目录及其中的文件") }
         val targets = sources.map { source -> folder.resolve(source.name).canonicalFile.also { target ->
-            require(!target.exists() && !target.toPath().startsWith(source.toPath())) { "目标已存在或位于源目录内" }
+            require(!target.exists() && !target.toPath().startsWith(source.toPath())) { throw LuaEditorIssue("issue.destination_conflict", "目标已存在或位于源目录内") }
         } }
-        require(targets.map { it.name.lowercase() }.distinct().size == targets.size) { "目标文件名重复" }
+        require(targets.map { it.name.lowercase() }.distinct().size == targets.size) { throw LuaEditorIssue("issue.duplicate_destination", "目标文件名重复") }
         val moved = mutableListOf<Pair<File, File>>()
         try { sources.zip(targets).forEach { (from, to) -> java.nio.file.Files.move(from.toPath(), to.toPath()); moved += from to to } }
         catch (failure: Throwable) { moved.asReversed().forEach { (from, to) -> java.nio.file.Files.move(to.toPath(), from.toPath()) }; throw failure }
@@ -73,16 +73,16 @@ class LuaDraftFiles(private val storage: PluginStorage, private val store: LuaSo
     }
     fun rename(draft: LuaDraft, path: String, destination: String) {
         val source = protected(draft, path)
-        require(destination.isNotBlank() && !destination.contains('/')) { "名称不能包含目录" }
+        require(destination.isNotBlank() && !destination.contains('/')) { throw LuaEditorIssue("issue.path_in_name", "名称不能包含目录") }
         val target = file(draft, (path.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }) + destination)
-        require(!target.exists()) { "名称已存在" }
+        require(!target.exists()) { throw LuaEditorIssue("issue.name_taken", "名称已存在") }
         java.nio.file.Files.move(source.toPath(), target.toPath())
         draft.modified = true
     }
     fun delete(draft: LuaDraft, paths: List<String>) {
         require(paths.isNotEmpty() && paths.distinct().size == paths.size)
         val files = paths.map { protected(draft, it) }
-        files.forEach { require(it.deleteRecursively()) { "删除失败" } }; draft.modified = true
+        files.forEach { require(it.deleteRecursively()) { throw LuaEditorIssue("issue.delete_failed", "删除失败") } }; draft.modified = true
     }
     fun create(draft: LuaDraft, name: String, folder: Boolean) {
         require(name.isNotBlank() && !name.contains('/') && name.length <= 100)
@@ -102,7 +102,7 @@ class LuaDraftFiles(private val storage: PluginStorage, private val store: LuaSo
             resources.forEach { source ->
                 require(source.canonicalFile.toPath().startsWith(storage.root.canonicalFile.toPath()) && source.isFile && source.length() <= 8 * 1024 * 1024L)
                 val target = file(draft, "$base/${source.name}")
-                require(!target.exists()) { "${source.name} 已存在" }
+                require(!target.exists()) { throw LuaEditorIssue("issue.file_exists", "${source.name} 已存在", "name" to source.name) }
                 target.parentFile.mkdirs(); source.copyTo(target); added += target
             }
             val files = draft.root.walkTopDown().filter { it.isFile }.toList()
@@ -118,7 +118,7 @@ class LuaDraftFiles(private val storage: PluginStorage, private val store: LuaSo
     fun review(draft: LuaDraft): LuaPending = store.stage(draft.root)
     @Synchronized fun close(draft: LuaDraft) { sessions.remove(draft.token); draft.root.deleteRecursively() }
     private fun protected(draft: LuaDraft, path: String): File {
-        require(path.startsWith("assets/")) { "main.lua 和 manifest.json 不能删除、移动或重命名" }
+        require(path.startsWith("assets/")) { throw LuaEditorIssue("issue.protected_files", "main.lua 和 manifest.json 不能删除、移动或重命名") }
         return file(draft, path).also { require(it.exists()) }
     }
 }

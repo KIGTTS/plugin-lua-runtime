@@ -12,10 +12,12 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.4")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.5")
     override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
     private var strings = PluginStrings(emptyMap())
     private fun copy(key: String) = strings.text(key, uiLocale)
+    private fun copy(context: PluginContext, key: String, vararg args: Pair<String, String>) =
+        strings.text(key, context.locale, args.toMap())
     private val pages get() = LuaRuntimePages { key, values -> strings.text(key, uiLocale, values) }
     private lateinit var environment: PluginEnvironment
     private lateinit var store: LuaSourceStore
@@ -63,12 +65,16 @@ class LuaRuntimePlugin : KigPlugin {
     override suspend fun execute(actionId: String, context: PluginContext): PluginOutcome = mutex.withLock {
         try { perform(actionId, context).also { revisions.value++ } }
         catch (cancel: CancellationException) { throw cancel }
-        catch (budget: LuaBudgetExceeded) { PluginOutcome.Message(budget.message ?: copy("timeout")) }
-        catch (failure: Exception) { PluginOutcome.Message(failure.message?.take(250) ?: copy("failure")) }
+        catch (budget: LuaBudgetExceeded) { PluginOutcome.Message(copy(context, "timeout")) }
+        catch (failure: Exception) { PluginOutcome.Message(when {
+            failure is LuaEditorIssue -> strings.text(failure.key, context.locale, failure.arguments, failure.message.orEmpty())
+            failure.message.orEmpty().contains("PERMISSION_REQUIRED") -> copy(context, "issue.permission")
+            else -> copy(context, "failure")
+        }) }
     }
     private suspend fun agent(context: PluginContext): PluginOutcome {
         val operation = context.inputs["operation"].orEmpty()
-        if (operation == "list") return PluginOutcome.Dialog("Lua 项目", buildJsonArray {
+        if (operation == "list") return PluginOutcome.Dialog(copy(context, "dialog.projects"), buildJsonArray {
             store.projects().forEach { project -> add(buildJsonObject {
                 put("id", project.manifest.id); put("name", project.manifest.name); put("enabled", project.enabled); put("error", project.error)
             }) }
@@ -90,13 +96,13 @@ class LuaRuntimePlugin : KigPlugin {
             "test", "validate" -> try { inspectLuaProject(executor, project, store.code(id), context) }
                 catch (failure: LuaInspectionFailure) { luaDiagnostic(failure, "test", id) }
             "enable" -> {
-                require(context.inputs["_agentApproved"] == "true") { "启用需要用户批准" }
+                require(context.inputs["_agentApproved"] == "true") { throw LuaEditorIssue("issue.approve_enable", "启用需要用户批准") }
                 store.verify(project); store.enabled(id, true); refresh(store.project(id), context)
                 buildJsonObject { put("enabled", store.project(id).enabled) }
             }
             "run" -> {
-                require(context.inputs["_agentApproved"] == "true") { "运行需要用户批准" }
-                require(project.enabled) { "请先启用项目" }
+                require(context.inputs["_agentApproved"] == "true") { throw LuaEditorIssue("issue.approve_run", "运行需要用户批准") }
+                require(project.enabled) { throw LuaEditorIssue("issue.enable", "请先启用项目") }
                 try {
                     val result = executor.call(project, "execute", context.copy(inputs = mapOf("value" to context.inputs["input"].orEmpty())), requireNotNull(context.inputs["action"]))
                     LuaUiSchema.outcome(id, result, project.manifest.permissions)
@@ -106,24 +112,24 @@ class LuaRuntimePlugin : KigPlugin {
                 catch (failure: Exception) { luaDiagnostic(failure, "execute", id) }
                 catch (failure: LuaBudgetExceeded) { luaDiagnostic(failure, "execute", id) }
             }
-            else -> error("未知Lua调试操作")
+            else -> throw LuaEditorIssue("issue.unknown_agent", "未知Lua调试操作")
         }
-        return luaResultDialog(value)
+        return luaResultDialog(value, copy(context, "dialog.result"))
     }
     private suspend fun perform(actionId: String, context: PluginContext): PluginOutcome {
         if (actionId == "agent-install") {
-            require(context.inputs["_agentApproved"] == "true") { "安装需要用户批准" }
+            require(context.inputs["_agentApproved"] == "true") { throw LuaEditorIssue("issue.approve_install", "安装需要用户批准") }
             val pending = store.stage(environment.storage.file(requireNotNull(context.inputs["resourcePath"])))
             try { inspectLuaProject(executor, LuaProject(pending.manifest, false, pending.hash), pending.directory, context) }
             catch (failure: LuaInspectionFailure) {
                 pending.directory.deleteRecursively()
-                return PluginOutcome.Dialog("插件检查失败", JsonObject(luaDiagnostic(failure, "validation", pending.manifest.id) +
+                return PluginOutcome.Dialog(copy(context, "dialog.check_failed"), JsonObject(luaDiagnostic(failure, "validation", pending.manifest.id) +
                     ("installed" to JsonPrimitive(false))).toString())
             }
             val project = store.confirm(pending)
             refresh(project, context)
             val installed = store.project(project.manifest.id)
-            return PluginOutcome.Dialog("安装结果", buildJsonObject {
+            return PluginOutcome.Dialog(copy(context, "dialog.install_result"), buildJsonObject {
                 put("ok", installed.enabled); put("installed", true); put("enabled", installed.enabled)
                 put("id", installed.manifest.id); put("error", installed.error)
             }.toString())
@@ -145,38 +151,38 @@ class LuaRuntimePlugin : KigPlugin {
                 val project = store.project(id)
                 for (permission in project.manifest.permissions) {
                     val reply = environment.appBroker?.request(AppCommand.Permission(permission, id))
-                    if ((reply as? AppReply.Data)?.value?.get("allowed")?.jsonPrimitive?.booleanOrNull != true) return PluginOutcome.Message("权限尚未授权，可在插件管理中调整")
+                    if ((reply as? AppReply.Data)?.value?.get("allowed")?.jsonPrimitive?.booleanOrNull != true) return PluginOutcome.Message(copy(context, "issue.permission"))
                 }
                 refresh(project, context); PluginOutcome.RefreshUi
             }
             "choose" -> PluginOutcome.ImportResource("导入 Lua 工具", "imports", "import", zip = true, mimeTypes = listOf("application/zip", "application/octet-stream"))
             "import" -> review(store.stage(environment.storage.file(requireNotNull(context.inputs["resourcePath"]))))
-            "create" -> PluginOutcome.TextInput("工具名称", "create-name")
+            "create" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "create-name")
             "native-builder" -> {
                 when (val reply = environment.appBroker?.request(AppCommand.PluginAction("tools.native-builder", "open"))) {
-                    is AppReply.Failure -> PluginOutcome.Message("请先安装并启用原生构建扩展")
+                    is AppReply.Failure -> PluginOutcome.Message(copy(context, "issue.install_builder"))
                     is AppReply.Data -> PluginOutcome.RefreshUi
-                    else -> PluginOutcome.Message("当前宿主不支持构建扩展")
+                    else -> PluginOutcome.Message(copy(context, "issue.builder_unavailable"))
                 }
             }
             "create-name" -> create(context.inputs["value"].orEmpty())
             "confirm" -> {
-                require(context.inputs["_callerPlugin"] == null) { "请在检查页面手动确认" }
-                val pending = reviews[id] ?: error("检查页面已更新，请重新打开")
+                require(context.inputs["_callerPlugin"] == null) { throw LuaEditorIssue("issue.manual_confirm", "请在检查页面手动确认") }
+                val pending = reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新，请重新打开")
                 executor.validate(pending.directory.resolve("main.lua").readText(Charsets.UTF_8))
                 val project = store.confirm(pending); synchronized(transient) { transient.remove("review/$id") }
                 reviews.remove(id)
                 refresh(project, context); open(pages.project(store.project(project.manifest.id)))
             }
-            "review-files" -> open(pages.files(files.inspect(reviews[id] ?: error("检查页面已更新")), files))
-            "review-export" -> (reviews[id] ?: error("检查页面已更新")).let { pending ->
+            "review-files" -> open(pages.files(files.inspect(reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")), files))
+            "review-export" -> (reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")).let { pending ->
                 PluginOutcome.ExportResource("完整源代码", PluginResource(pending.directory.resolve("main.lua").relativeTo(environment.storage.root).invariantSeparatorsPath), "main.lua", "text/plain")
             }
             "project" -> open(pages.project(store.project(id)))
             "enable" -> {
                 val project = store.project(id)
                 if (!project.enabled) {
-                    require(context.inputs["_callerPlugin"] == null) { "请在工具页面手动启用" }
+                    require(context.inputs["_callerPlugin"] == null) { throw LuaEditorIssue("issue.manual_enable", "请在工具页面手动启用") }
                     store.verify(project); store.enabled(id, true); refresh(store.project(id), context)
                 } else { store.enabled(id, false); synchronized(ui) { ui.remove(id) } }
                 open(pages.project(store.project(id)))
@@ -189,17 +195,17 @@ class LuaRuntimePlugin : KigPlugin {
             }
             "export" -> store.export(id).let { PluginOutcome.ExportResource("导出工具", PluginResource(it.relativeTo(environment.storage.root).invariantSeparatorsPath), "$id.kiglua", "application/zip") }
             "test" -> {
-                val project = store.project(id); require(project.enabled) { "请先检查并启用工具" }
+                val project = store.project(id); require(project.enabled) { throw LuaEditorIssue("issue.test_disabled", "请先检查并启用工具") }
                 val value = executor.call(project, "test", context)
-                PluginOutcome.Dialog("测试结果", if (value == JsonNull) "语法和页面合同检查通过；未提供 test(ctx) 函数。" else value.toString().take(16000))
+                PluginOutcome.Dialog(copy(context, "dialog.test_result"), if (value == JsonNull) copy(context, "dialog.test_passed") else value.toString().take(16000))
             }
             "files" -> open(pages.files(files.create(id), files))
             "file-open" -> files.session(id).let { draft ->
                 val path = requireNotNull(context.inputs["path"]); val file = if (path.isEmpty()) files.directory(draft, "") else files.file(draft, path)
                 if (file.isDirectory) { draft.directory = path; open(pages.files(draft, files)) }
                 else {
-                    require(file.isFile && file.length() <= LuaSourceStore.SOURCE_LIMIT && file.readBytes().none { it == 0.toByte() }) { "请选择较小的文本文件" }
-                    val source = file.readText(Charsets.UTF_8); require(source.length <= 64000) { "此文件较大，请导出后编辑" }
+                    require(file.isFile && file.length() <= LuaSourceStore.SOURCE_LIMIT && file.readBytes().none { it == 0.toByte() }) { throw LuaEditorIssue("issue.small_text", "请选择较小的文本文件") }
+                    val source = file.readText(Charsets.UTF_8); require(source.length <= 64000) { throw LuaEditorIssue("issue.large_text", "此文件较大，请导出后编辑") }
                     draft.editing = path; open(pages.editor(draft, files))
                 }
             }
@@ -209,13 +215,13 @@ class LuaRuntimePlugin : KigPlugin {
             }
             "file-operation" -> operation(files.session(id), context)
             "file-delete" -> {
-                val (draft, paths) = deletes.remove(id) ?: error("确认已失效")
+                val (draft, paths) = deletes.remove(id) ?: throw LuaEditorIssue("issue.confirm_expired", "确认已失效")
                 require(context.inputs["_callerPlugin"] == null); files.delete(draft, paths); open(pages.files(draft, files))
             }
             "file-write" -> files.session(id).let { draft -> files.write(draft, context.inputs["value"].orEmpty()); cache(pages.editor(draft, files)); PluginOutcome.RefreshUi }
             "file-import" -> files.session(id).let { draft ->
                 context.inputs["directory"]?.let { draft.directory = it }
-                PluginOutcome.ImportResource("导入资源", "imports/files", "file-imported/$id", multiple = true)
+                PluginOutcome.ImportResource(copy(context, "dialog.import_files"), "imports/files", "file-imported/$id", multiple = true)
             }
             "file-imported" -> files.session(id).let { draft ->
                 val resources = context.inputs["resourcePaths"]?.let { PluginJson.decodeFromString<List<String>>(it) }
@@ -224,21 +230,21 @@ class LuaRuntimePlugin : KigPlugin {
             }
             "file-new" -> files.session(id).let { draft ->
                 context.inputs["directory"]?.let { draft.directory = it }
-                PluginOutcome.Menu("新建", listOf(PageAction("file-folder/$id", "文件夹", PluginIcon.ADD), PageAction("file-text/$id", "文本文件", PluginIcon.TEXT)))
+                PluginOutcome.Menu(copy(context, "dialog.new_file"), listOf(PageAction("file-folder/$id", copy(context, "dialog.folder"), PluginIcon.ADD), PageAction("file-text/$id", copy(context, "dialog.text_file"), PluginIcon.TEXT)))
             }
-            "file-folder" -> PluginOutcome.TextInput("文件夹名称", "file-folder-name/$id")
-            "file-text" -> PluginOutcome.TextInput("文件名称", "file-text-name/$id")
+            "file-folder" -> PluginOutcome.TextInput(copy(context, "dialog.folder_name"), "file-folder-name/$id")
+            "file-text" -> PluginOutcome.TextInput(copy(context, "dialog.file_name"), "file-text-name/$id")
             "file-folder-name", "file-text-name" -> files.session(id).let { draft -> files.create(draft, context.inputs["value"].orEmpty(), action == "file-folder-name"); open(pages.files(draft, files)) }
             "validate" -> files.session(id).let { draft ->
-                require(draft.editing.endsWith(".lua")); executor.validate(files.file(draft, draft.editing).readText(Charsets.UTF_8)); PluginOutcome.Message("语法检查通过")
+                require(draft.editing.endsWith(".lua")); executor.validate(files.file(draft, draft.editing).readText(Charsets.UTF_8)); PluginOutcome.Message(copy(context, "dialog.syntax_passed"))
             }
             "draft-review" -> files.session(id).let { draft -> review(files.review(draft)).also { files.close(draft); synchronized(transient) { transient.remove("draft/$id"); transient.remove("edit/$id") } } }
             "draft-close" -> files.session(id).let { draft -> files.close(draft); synchronized(transient) { transient.remove("draft/$id"); transient.remove("edit/$id") }
-                draft.reviewOf?.let { token -> review(reviews[token] ?: error("检查页面已更新")) } ?: open(pages.project(store.project(draft.projectId))) }
+                draft.reviewOf?.let { token -> review(reviews[token] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")) } ?: open(pages.project(store.project(draft.projectId))) }
             "draft-back" -> open(pages.files(files.session(id), files))
             "module" -> {
                 val module = id.substringBefore('/'); val command = id.substringAfter('/')
-                val project = store.project(module); require(project.enabled) { "工具已停用" }
+                val project = store.project(module); require(project.enabled) { throw LuaEditorIssue("issue.disabled", "工具已停用") }
                 try {
                     store.verify(project)
                     val result = LuaUiSchema.outcome(module, executor.call(project, "execute", context, command), project.manifest.permissions)
@@ -250,7 +256,7 @@ class LuaRuntimePlugin : KigPlugin {
                 } catch (failure: LuaBudgetExceeded) { fail(module, failure.message.orEmpty()); throw failure }
                 catch (failure: Exception) { if (failure is CancellationException) throw failure; if (!failure.message.orEmpty().contains("PERMISSION_REQUIRED")) fail(module, failure.message.orEmpty()); throw failure }
             }
-            else -> PluginOutcome.Message("未找到操作")
+            else -> PluginOutcome.Message(copy(context, "issue.action_missing"))
         }
     }
     private suspend fun refresh(project: LuaProject, context: PluginContext) {
@@ -259,21 +265,21 @@ class LuaRuntimePlugin : KigPlugin {
             val contributions = LuaUiSchema.contributions(project.manifest.id, executor.call(project, "contributions", context))
             val pages = LuaUiSchema.pages(project.manifest.id, executor.call(project, "pages", context))
             val existing = synchronized(ui) { ui.values.filter { it !== ui[project.manifest.id] }.sumOf { it.pages.size } }
-            require(existing + pages.size <= 32) { "已到达工具页面数量上限" }
+            require(existing + pages.size <= 32) { throw LuaEditorIssue("issue.page_limit", "已到达工具页面数量上限") }
             val existingSettings = synchronized(ui) { ui.filterKeys { it != project.manifest.id }.values.sumOf { it.contributions.settingsEntries.size } }
-            require(existingSettings + contributions.settingsEntries.size <= 60) { "已到达设置入口数量上限" }
+            require(existingSettings + contributions.settingsEntries.size <= 60) { throw LuaEditorIssue("issue.settings_limit", "已到达设置入口数量上限") }
             val pageBytes = PluginJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(PluginPage.serializer()), pages).toByteArray().size
             val otherBytes = synchronized(ui) { ui.filterKeys { it != project.manifest.id }.values.sumOf {
                 PluginJson.encodeToString(kotlinx.serialization.builtins.ListSerializer(PluginPage.serializer()), it.pages).toByteArray().size
             } }
-            require(pageBytes + otherBytes <= 120 * 1024) { "工具页面内容过多，请精简文本" }
+            require(pageBytes + otherBytes <= 120 * 1024) { throw LuaEditorIssue("issue.page_length", "工具页面内容过多，请精简文本") }
             val contributionBytes = PluginJson.encodeToString(PluginContributions.serializer(), contributions).toByteArray().size
             val otherContributions = synchronized(ui) { ui.filterKeys { it != project.manifest.id }.values.sumOf {
                 PluginJson.encodeToString(PluginContributions.serializer(), it.contributions).toByteArray().size
             } }
-            require(pageBytes + otherBytes + contributionBytes + otherContributions <= 180 * 1024) { "工具界面内容过多，请精简设置或按钮说明" }
-            require(contributions.drawerEntries.all { entry -> pages.any { it.id == entry.pageId } }) { "页面入口没有对应页面" }
-            require(contributions.settingsEntries.all { entry -> pages.any { it.id == entry.pageId } }) { "设置入口没有对应页面" }
+            require(pageBytes + otherBytes + contributionBytes + otherContributions <= 180 * 1024) { throw LuaEditorIssue("issue.ui_length", "工具界面内容过多，请精简设置或按钮说明") }
+            require(contributions.drawerEntries.all { entry -> pages.any { it.id == entry.pageId } }) { throw LuaEditorIssue("issue.missing_page", "页面入口没有对应页面") }
+            require(contributions.settingsEntries.all { entry -> pages.any { it.id == entry.pageId } }) { throw LuaEditorIssue("issue.missing_settings", "设置入口没有对应页面") }
             PluginSnapshot(descriptor, contributions, pages)
             synchronized(ui) { ui[project.manifest.id] = Ui(contributions, pages) }
         } catch (cancel: CancellationException) { throw cancel }
@@ -281,7 +287,7 @@ class LuaRuntimePlugin : KigPlugin {
         catch (failure: Exception) {
             if (failure.message.orEmpty().contains("PERMISSION_REQUIRED")) {
                 val module = project.manifest.id
-                val page = PluginPage("module/$module/permissions", project.manifest.name, listOf(PageBlock.Notice("此插件需要权限才能读取数据，授权后可继续。"), PageBlock.Actions(listOf(PageAction("permissions/$module", "继续")))))
+                val page = PluginPage("module/$module/permissions", project.manifest.name, listOf(PageBlock.Notice(copy(context, "dialog.permissions")), PageBlock.Actions(listOf(PageAction("permissions/$module", copy(context, "dialog.continue"))))))
                 val entry = SettingsEntry("module/$module/entry", project.manifest.name, page.id)
                 synchronized(ui) { ui[module] = Ui(PluginContributions(settingsEntries = listOf(entry)), listOf(page)) }
             } else fail(project.manifest.id, failure.message.orEmpty())
@@ -292,7 +298,7 @@ class LuaRuntimePlugin : KigPlugin {
         executor.validate(pending.directory.resolve("main.lua").readText(Charsets.UTF_8))
         val previous = reviews.values.filter { it.manifest.id == pending.manifest.id && it.token != pending.token }
         previous.forEach { old -> reviews.remove(old.token); synchronized(transient) { transient.remove("review/${old.token}") }; old.directory.deleteRecursively() }
-        require(reviews.size < 8 || pending.token in reviews) { "请先完成其它工具的检查" }
+        require(reviews.size < 8 || pending.token in reviews) { throw LuaEditorIssue("issue.review_limit", "请先完成其它工具的检查") }
         reviews[pending.token] = pending
         return open(pages.review(pending, store.projects().firstOrNull { it.manifest.id == pending.manifest.id }))
     }
@@ -312,16 +318,16 @@ class LuaRuntimePlugin : KigPlugin {
             "rename" -> { require(paths.size == 1); files.rename(draft, paths.single(), context.inputs["destination"].orEmpty()); open(pages.files(draft, files)) }
             "delete" -> {
                 require(paths.isNotEmpty()); val token = UUID.randomUUID().toString(); deletes[token] = draft to paths
-                open(PluginPage("file-delete/$token", "删除文件", listOf(PageBlock.Notice("删除所选的 ${paths.size} 个项目？"),
+                open(PluginPage("file-delete/$token", copy(context, "dialog.delete_files"), listOf(PageBlock.Notice(copy(context, "dialog.delete_count", "count" to paths.size.toString())),
                     PageBlock.Actions(listOf(PageAction("file-delete/$token", "确认删除", PluginIcon.CLOSE))))))
             }
-            else -> error("未知文件操作")
+            else -> throw LuaEditorIssue("issue.unknown_file_action", "未知文件操作")
         }
     }
     private fun open(page: PluginPage): PluginOutcome { cache(page); return PluginOutcome.OpenPage(page.id) }
     private fun cache(page: PluginPage) = synchronized(transient) {
         fun bytes(value: PluginPage) = PluginJson.encodeToString(PluginPage.serializer(), value).toByteArray().size
-        require(bytes(page) <= 250 * 1024) { "页面内容过大，请导出后编辑" }
+        require(bytes(page) <= 250 * 1024) { throw LuaEditorIssue("issue.preview_large", "页面内容过大，请导出后编辑") }
         if (page.blocks.any { it is PageBlock.SourceEditor }) transient.entries.removeAll { (id, value) -> id != page.id && value.blocks.any { it is PageBlock.SourceEditor } }
         transient[page.id] = page
         while (transient.size > 16 || transient.values.sumOf(::bytes) > 250 * 1024) transient.remove(transient.keys.first())

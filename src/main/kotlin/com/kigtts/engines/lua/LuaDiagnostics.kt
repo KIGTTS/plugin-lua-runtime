@@ -52,11 +52,11 @@ internal fun luaDiagnostic(error: Throwable, phase: String, project: String? = n
     put("retryable", !unknown); put("outcomeUnknown", unknown)
 }
 
-internal fun luaResultDialog(value: JsonElement): PluginOutcome.Dialog {
+internal fun luaResultDialog(value: JsonElement, title: String = "Lua 结果"): PluginOutcome.Dialog {
     val raw = value.toString()
     val result = if (raw.length <= 16000) raw else buildJsonObject {
         put("ok", (value as? JsonObject)?.get("ok") ?: JsonPrimitive(true))
         put("truncated", true); put("resultPreview", raw.take(6000))
     }.toString()
-    return PluginOutcome.Dialog("Lua 结果", result)
+    return PluginOutcome.Dialog(title, result)
 }
