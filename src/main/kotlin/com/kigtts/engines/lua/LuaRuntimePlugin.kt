@@ -12,7 +12,7 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.5")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.6")
     override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
     private var strings = PluginStrings(emptyMap())
     private fun copy(key: String) = strings.text(key, uiLocale)
@@ -155,7 +155,7 @@ class LuaRuntimePlugin : KigPlugin {
                 }
                 refresh(project, context); PluginOutcome.RefreshUi
             }
-            "choose" -> PluginOutcome.ImportResource("导入 Lua 工具", "imports", "import", zip = true, mimeTypes = listOf("application/zip", "application/octet-stream"))
+            "choose" -> PluginOutcome.ImportResource(copy(context, "import"), "imports", "import", zip = true, mimeTypes = listOf("application/zip", "application/octet-stream"))
             "import" -> review(store.stage(environment.storage.file(requireNotNull(context.inputs["resourcePath"]))))
             "create" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "create-name")
             "native-builder" -> {
@@ -176,7 +176,7 @@ class LuaRuntimePlugin : KigPlugin {
             }
             "review-files" -> open(pages.files(files.inspect(reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")), files))
             "review-export" -> (reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")).let { pending ->
-                PluginOutcome.ExportResource("完整源代码", PluginResource(pending.directory.resolve("main.lua").relativeTo(environment.storage.root).invariantSeparatorsPath), "main.lua", "text/plain")
+                PluginOutcome.ExportResource(copy(context, "exportSource"), PluginResource(pending.directory.resolve("main.lua").relativeTo(environment.storage.root).invariantSeparatorsPath), "main.lua", "text/plain")
             }
             "project" -> open(pages.project(store.project(id)))
             "enable" -> {

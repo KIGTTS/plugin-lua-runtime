@@ -1,8 +1,8 @@
 {
   "id": "runtime.lua",
   "name": "插件编辑器",
-  "version": "0.9.5",
-  "versionCode": 9,
+  "version": "0.9.6",
+  "versionCode": 10,
   "entryClass": "com.kigtts.engines.lua.LuaRuntimePlugin",
   "apiVersion": 34,
   "minSdk": 26,
