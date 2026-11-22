@@ -7,9 +7,8 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
     fun manager(projects: List<LuaProject>) = PluginPage("manager", copy("title"), listOf(
         PageBlock.Group(copy("tools"), listOf(PageBlock.Actions(listOf(
             PageAction("choose", copy("import"), PluginIcon.ADD), PageAction("create", copy("new"), PluginIcon.EDIT))))),
-        PageBlock.Group(copy("build"), listOf(PageBlock.Actions(listOf(PageAction("native-builder", copy("java"), PluginIcon.TEXT))))),
     ), ManagementList("lua-projects", projects.map { project ->
-        ManagementItem(project.manifest.id, project.manifest.name, if (project.error.isEmpty()) project.manifest.version else copy("dialog.project_failed"), PluginIcon.TEXT, symbol = project.manifest.icon,
+        ManagementItem(project.manifest.id, project.manifest.name, if (project.error.isEmpty()) "Lua · ${project.manifest.version}" else copy("dialog.project_failed"), PluginIcon.TEXT, symbol = project.manifest.icon,
             primaryAction = "project/${project.manifest.id}")
     }, emptyText = copy("empty")))
     fun project(project: LuaProject) = PluginPage("project/${project.manifest.id}", project.manifest.name, listOf(

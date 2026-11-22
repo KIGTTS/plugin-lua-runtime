@@ -12,7 +12,7 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.9")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.10")
     override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
     private var strings = PluginStrings(emptyMap())
     private fun copy(key: String) = strings.text(key, uiLocale)
@@ -158,10 +158,16 @@ class LuaRuntimePlugin : KigPlugin {
                 refresh(project, context); PluginOutcome.RefreshUi
             }
             "choose" -> PluginOutcome.ImportResource(copy(context, "import"), "imports", "import", zip = true, mimeTypes = listOf("application/zip", "application/octet-stream"))
-            "import" -> review(store.stage(environment.storage.file(requireNotNull(context.inputs["resourcePath"]))))
+            "import" -> {
+                val path = requireNotNull(context.inputs["resourcePath"])
+                val source = environment.storage.file(path)
+                if (source.resolve("plugin-spec.json").isFile) NativeBuilderLink.importProject(environment, path)
+                else review(store.stage(source))
+            }
+            "resume-native-import" -> NativeBuilderLink.resumeImport(environment)
             "create" -> PluginOutcome.Menu(copy(context, "new"), listOf(
                 PageAction("create-lua", "Lua", PluginIcon.TEXT),
-                PageAction("create-native", copy(context, "java"), PluginIcon.TEXT)))
+                PageAction("create-native", copy(context, "native"), PluginIcon.TEXT)))
             "create-lua" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "create-name")
             "native-builder", "create-native" -> NativeBuilderLink.open(environment, if (action == "create-native") "new" else "open")
             "create-name" -> create(context.inputs["value"].orEmpty())

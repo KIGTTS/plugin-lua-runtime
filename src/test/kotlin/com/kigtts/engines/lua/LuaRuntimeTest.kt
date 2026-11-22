@@ -89,6 +89,31 @@ class LuaRuntimeTest {
         assertTrue(directory.resolve("index.html").isFile)
         assertEquals("body { color: teal }", directory.resolve("site.css").readText())
     }
+    @Test fun unifiedSourceImportRecognizesNativeProjectsAndForwardsTheReview() = runBlocking {
+        val commands = mutableListOf<AppCommand>()
+        val host = environment(object : AppBroker {
+            override suspend fun request(command: AppCommand): AppReply {
+                commands += command
+                return AppReply.Data(buildJsonObject {
+                    put("plugins", buildJsonArray {
+                        add(buildJsonObject {
+                            put("id", "tools.native-builder"); put("enabled", true); put("versionCode", 6)
+                            put("publisherSha256", "b5927c76c21539ef99352707c215b3ce48f3fed937a6f995d39a3c677a052ab5")
+                        })
+                    })
+                })
+            }
+        })
+        val path = "imports/native"
+        host.storage.directory(path).resolve("plugin-spec.json").writeText("{}")
+        val editor = LuaRuntimePlugin()
+        editor.attach(host)
+        val result = editor.execute("import", PluginContext("", "", inputs = mapOf("resourcePath" to path)))
+        assertEquals(PluginOutcome.RefreshUi, result)
+        assertEquals(listOf(AppCommand.Describe, AppCommand.DeliverResource("tools.native-builder",
+            PluginResource(path), "import")), commands)
+        assertFalse(host.storage.file("config/native-project-import.txt").exists())
+    }
     @Test fun editorDraftExportsASignedStandalonePackageAndCanRunWithoutTheEditor() = runBlocking {
         val editor = environment()
         File(requireNotNull(editor.assets.parentFile), "code/classes.dex").apply {
