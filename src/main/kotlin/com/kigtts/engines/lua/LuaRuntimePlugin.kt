@@ -12,7 +12,7 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.8")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.9")
     override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
     private var strings = PluginStrings(emptyMap())
     private fun copy(key: String) = strings.text(key, uiLocale)
