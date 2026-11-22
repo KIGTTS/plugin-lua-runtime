@@ -77,6 +77,7 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
         } catch (failure: Exception) { coroutine.ensureActive(); throw failure }
     }
     private var standalonePrototype: Prototype? = null
+    private val assetPaths by lazy { LuaAssetPaths(environment.storage) }
     private fun compile(source: String, name: String = "main.lua"): Prototype {
         val bytes = source.toByteArray(Charsets.UTF_8)
         require(bytes.size in 1..LuaSourceStore.SOURCE_LIMIT && bytes.first() != 27.toByte() && bytes.none { it == 0.toByte() }) { "只允许 UTF-8 源代码" }
@@ -88,22 +89,10 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
         val assets = sourceDirectory.resolve("assets")
         val modules = mutableMapOf<String, LuaValue>()
         val loading = mutableSetOf<String>()
+        val mountedAssets by lazy { assetPaths.mount(sourceDirectory) }
         fun availableAsset(path: String): File {
-            val original = scoped(assets, path)
-            require(original.isFile && standalone)
-            val version = sourceDirectory.parentFile?.parentFile?.name.orEmpty()
-            require(version.matches(Regex("[A-Za-z0-9_.-]+")))
-            val target = environment.storage.file("lua-assets/$version/$path")
-            if (!target.isFile) {
-                val directory = requireNotNull(target.parentFile)
-                directory.mkdirs()
-                val temporary = File.createTempFile("asset-", ".part", directory)
-                try {
-                    original.copyTo(temporary, overwrite = true)
-                    check(temporary.renameTo(target) || target.isFile)
-                } finally { temporary.delete() }
-            }
-            return target
+            require(standalone && scoped(assets, path).exists())
+            return mountedAssets.file(path)
         }
         fun gate(permission: String) { require(permission in permissions) { "未授予 $permission" }; budget.check() }
         fun function(body: (Varargs) -> LuaValue) = object : VarArgFunction() {

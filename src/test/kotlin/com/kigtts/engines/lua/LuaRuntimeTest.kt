@@ -70,6 +70,25 @@ class LuaRuntimeTest {
         assertEquals(RecognitionEvent.Final(RecognitionResult("flushed")), recognizer.recognizeStream(flowOf(PcmAudio(pcm))).toList().last())
         assertTrue(LuaSourceStore(host.storage).data("example").temporary.listFiles().orEmpty().isEmpty())
     }
+    @Test fun packagedHtmlAssetsCanBePassedToTheNativeHostAsOneDirectory() = runBlocking {
+        val host = environment()
+        val source = packageDirectory(host, """
+            return { execute = function()
+              return {type="message", text=host.asset.path("html")}
+            end }
+        """.trimIndent())
+        source.resolve("assets/html").mkdirs()
+        source.resolve("assets/html/index.html").writeText("<link rel=stylesheet href=site.css>")
+        source.resolve("assets/html/site.css").writeText("body { color: teal }")
+        source.copyRecursively(host.assets.resolve("lua-project"))
+        val plugin = LuaPackagedPlugin(PluginJson.encodeToString(PluginDescriptor.serializer(),
+            PluginDescriptor("example", "Example", "", "1.0")))
+        plugin.attach(host)
+        val outcome = plugin.execute("path", PluginContext("", "")) as PluginOutcome.Message
+        val directory = host.storage.file(outcome.text)
+        assertTrue(directory.resolve("index.html").isFile)
+        assertEquals("body { color: teal }", directory.resolve("site.css").readText())
+    }
     @Test fun editorDraftExportsASignedStandalonePackageAndCanRunWithoutTheEditor() = runBlocking {
         val editor = environment()
         File(requireNotNull(editor.assets.parentFile), "code/classes.dex").apply {
