@@ -10,6 +10,7 @@
   "empty": "Lua ツールを読み込むか作成できます",
   "tool": "ツール",
   "enable": "有効にする",
+  "debugBuild": "ビルドしてデバッグを有効にする",
   "files": "プロジェクトファイル",
   "test": "テスト",
   "export": "書き出す",
@@ -117,5 +118,7 @@
   "issue.invalid_id": "ツールIDが無効です",
   "issue.utf8": "UTF-8のソースファイルを使用してください",
   "issue.unknown_agent": "不明なLuaデバッグ操作",
-  "list.separator": "、"
+  "list.separator": "、",
+  "dialog.icon": "Material アイコン名",
+  "issue.legacy_package": "ソース ZIP を選ぶか、プラグイン一覧から署名済みパッケージをインストールしてください"
 }

@@ -2,6 +2,8 @@ package com.kigtts.engines.lua
 
 import com.kigtts.plugin.api.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.toList
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
@@ -30,6 +32,94 @@ class LuaRuntimeTest {
         val store = LuaSourceStore(environment.storage)
         return store to store.confirm(store.stage(packageDirectory(environment, source, permissions = permissions)))
     }
+    @Test fun packagedLuaProvidesSpeechEnginesAndFlushesTheFinalUtterance() = runBlocking {
+        val host = environment()
+        val source = packageDirectory(host, """
+            return {
+              engines = function()
+                return {tts={supportsControl=true}, asr={streaming="INCREMENTAL"}}
+              end,
+              synthesize = function(job)
+                assert(job.request.text == "hello")
+                host.binary.write(job.output, "AQACAA==")
+                return {format={sampleRate=16000, channels=1}}
+              end,
+              recognize = function(job)
+                assert(host.binary.read(job.input) == "AQACAA==")
+                return {text="batch"}
+              end,
+              recognize_stream = function(job)
+                if job.eof then
+                  local text = job.state or "missing"
+                  return '{"events":[{"type":"com.kigtts.plugin.api.RecognitionEvent.Final","result":{"text":"'..text..'"}}]}'
+                end
+                assert(job.pcm == "AQACAA==")
+                return {state="flushed"}
+              end
+            }
+        """.trimIndent(), permissions = listOf("tts", "asr-batch", "asr-incremental"))
+        source.copyRecursively(host.assets.resolve("lua-project"))
+        val plugin = LuaPackagedPlugin(PluginJson.encodeToString(PluginDescriptor.serializer(),
+            PluginDescriptor("example", "Example", "", "1.0")))
+        plugin.attach(host)
+        val pcm = byteArrayOf(1, 0, 2, 0)
+        val events = requireNotNull(plugin.tts).synthesize(TtsRequest("hello")).toList()
+        assertArrayEquals(pcm, (events[1] as SynthesisEvent.Audio).audio.bytes)
+        val recognizer = requireNotNull(plugin.asr)
+        assertEquals("batch", recognizer.recognize(PcmAudio(pcm)).text)
+        assertEquals(RecognitionEvent.Final(RecognitionResult("flushed")), recognizer.recognizeStream(flowOf(PcmAudio(pcm))).toList().last())
+        assertTrue(LuaSourceStore(host.storage).data("example").temporary.listFiles().orEmpty().isEmpty())
+    }
+    @Test fun editorDraftExportsASignedStandalonePackageAndCanRunWithoutTheEditor() = runBlocking {
+        val editor = environment()
+        File(requireNotNull(editor.assets.parentFile), "code/classes.dex").apply {
+            requireNotNull(parentFile).mkdirs()
+            writeText("fixture dex")
+        }
+        val editorStore = LuaSourceStore(editor.storage)
+        val data = packageDirectory(editor, """
+            return {
+              contributions = function(ctx)
+                return {sdk = {drawerEntries = {{id="test", label="Test", pageId="main", icon="INFO"}}}}
+              end,
+              pages = function(ctx) return [[{"sdk":[{"id":"main","title":"Test","blocks":[]}]}]] end,
+              execute = function(action, ctx) return {type="message", text=action} end
+            }
+        """.trimIndent())
+        val project = editorStore.confirm(editorStore.stage(data), enabled = false)
+        assertFalse(project.enabled)
+        val renamed = editorStore.updatePresentation(project.manifest.id, name = "Standalone test", icon = "extension")
+        val archive = LuaPackageWriter(editor, editorStore).write(renamed)
+        assertEquals("kigplugin", archive.extension)
+        val installed = environment()
+        java.util.zip.ZipFile(archive).use { zip ->
+            fun bytes(path: String) = zip.getInputStream(zip.getEntry(path)).use { it.readBytes() }
+            val manifest = bytes("plugin.json")
+            val key = java.security.KeyFactory.getInstance("RSA").generatePublic(
+                java.security.spec.X509EncodedKeySpec(bytes("signature/public.der")))
+            assertTrue(java.security.Signature.getInstance("SHA256withRSA").run {
+                initVerify(key)
+                update(manifest)
+                verify(bytes("signature/manifest.sig"))
+            })
+            val files = Json.parseToJsonElement(manifest.toString(Charsets.UTF_8)).jsonObject.getValue("files").jsonObject
+            assertTrue("code/classes.dex" in files)
+            assertFalse(files.keys.any { "data/" in it || "publisher" in it })
+            files.keys.filter { it.startsWith("assets/lua-project/") }.forEach { path ->
+                installed.assets.resolve(path.removePrefix("assets/")).apply {
+                    requireNotNull(parentFile).mkdirs()
+                    writeBytes(bytes(path))
+                }
+            }
+        }
+        val plugin = LuaPackagedPlugin(PluginJson.encodeToString(PluginDescriptor.serializer(),
+            PluginDescriptor(renamed.manifest.id, renamed.manifest.name, "", renamed.manifest.version)))
+        plugin.attach(installed)
+        val context = PluginContext("", "")
+        assertEquals("main", plugin.contributions.drawerEntries.single().pageId)
+        assertEquals("Test", plugin.page("main", context)?.title)
+        assertEquals(PluginOutcome.Message("launch"), plugin.execute("launch", context))
+    }
     @Test fun importedCodeWaitsForHumanConfirmationAndRegistersScopedNativeUi() = runBlocking {
         val environment = environment()
         val directory = packageDirectory(environment, """
@@ -47,6 +137,8 @@ class LuaRuntimeTest {
         val denied = plugin.execute("confirm/$token", PluginContext("", "", inputs = mapOf("_callerPlugin" to "agent")))
         assertTrue(denied is PluginOutcome.Message); assertTrue(plugin.contributions.actions.isEmpty())
         plugin.execute("confirm/$token", PluginContext("", ""))
+        assertTrue(plugin.contributions.actions.isEmpty())
+        plugin.execute("enable/example", PluginContext("", ""))
         assertEquals("module/example/hello", plugin.contributions.actions.single().id)
         assertEquals(PluginOutcome.Message("完成"), plugin.execute("module/example/hello", PluginContext("", "")))
     }
@@ -89,6 +181,7 @@ class LuaRuntimeTest {
         val good = packageDirectory(environment, "return {execute=function(a,c) return {type='message',text='正常'} end}", "good")
         val goodPage = plugin.execute("import", PluginContext("", "", inputs = mapOf("resourcePath" to good.relativeTo(environment.storage.root).invariantSeparatorsPath))) as PluginOutcome.OpenPage
         plugin.execute("confirm/${goodPage.pageId.substringAfter('/')}", PluginContext("", ""))
+        plugin.execute("enable/good", PluginContext("", ""))
         assertEquals(PluginOutcome.Message("正常"), plugin.execute("module/good/hello", PluginContext("", "")))
     }
     @Test fun unavailableLibrariesCannotEscapeIntoJavaOrFiles() = runBlocking {
@@ -143,10 +236,10 @@ class LuaRuntimeTest {
     }
     @Test fun packagePathAndCapabilityValidationRejectsBadInput() {
         val environment = environment(); val store = LuaSourceStore(environment.storage)
-        val zip = environment.storage.file("imports/evil.kiglua").also { it.parentFile.mkdirs() }
+        val zip = environment.storage.file("imports/unsafe.zip").also { it.parentFile.mkdirs() }
         ZipOutputStream(zip.outputStream()).use { it.putNextEntry(ZipEntry("../main.lua")); it.write("return {}".toByteArray()); it.closeEntry() }
         try { store.stage(zip); fail() } catch (_: IllegalArgumentException) {}
-        val bad = packageDirectory(environment, "return {}", "permissions", listOf("network"))
+        val bad = packageDirectory(environment, "return {}", "permissions", listOf("process"))
         try { store.stage(bad); fail() } catch (_: IllegalArgumentException) {}
         val bytecode = packageDirectory(environment, "\u001bLua", "binary")
         try { store.stage(bytecode); fail() } catch (_: IllegalArgumentException) {}

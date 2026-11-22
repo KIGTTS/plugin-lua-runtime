@@ -10,6 +10,7 @@
   "empty": "导入或创建自己的 Lua 工具",
   "tool": "工具",
   "enable": "启用",
+  "debugBuild": "构建并启用调试",
   "files": "项目文件",
   "test": "测试",
   "export": "导出",
@@ -117,5 +118,7 @@
   "issue.invalid_id": "无效工具 ID",
   "issue.utf8": "只接受 UTF-8 源文件",
   "issue.unknown_agent": "未知Lua调试操作",
-  "list.separator": "、"
+  "list.separator": "、",
+  "dialog.icon": "Material 图标名称",
+  "issue.legacy_package": "请选择源码 ZIP，或从插件列表安装已签名的插件包"
 }

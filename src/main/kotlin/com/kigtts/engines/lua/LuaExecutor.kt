@@ -9,16 +9,18 @@ import org.luaj.vm2.lib.*
 import org.luaj.vm2.lib.jse.JseMathLib
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.RandomAccessFile
 import kotlin.coroutines.CoroutineContext
 
 class LuaBudgetExceeded(message: String) : Error(message)
 
 /** Fresh globals per operation. The only object exposed to Lua is a data/function table. */
 class LuaExecutor(private val environment: PluginEnvironment, private val store: LuaSourceStore,
-    private val instructionLimit: Int = 250_000, private val durationMillis: Long = 2_000) {
+    private val instructionLimit: Int = 250_000, private val durationMillis: Long = 2_000,
+    private val standalone: Boolean = false) {
     fun validate(source: String) { compile(source) }
     suspend fun call(project: LuaProject, method: String, context: PluginContext, action: String? = null,
-        sourceDirectory: File = store.code(project.manifest.id)): JsonElement = withContext(Dispatchers.Default) {
+        sourceDirectory: File = store.code(project.manifest.id), input: JsonElement? = null): JsonElement = withContext(Dispatchers.Default) {
         val coroutine = currentCoroutineContext()
         val deadline = System.nanoTime() + durationMillis * 1_000_000
         val globals = Globals()
@@ -53,18 +55,28 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
         globals.get("string").set("find", object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs = find.invoke(LuaValue.varargsOf(arrayOf(args.arg1(), args.arg(2), args.arg(3), LuaValue.TRUE)))
         })
-        globals.set("host", host(project, method == "execute", coroutine, budget, globals, sourceDirectory, context.locale))
-        val prototype = compile(sourceDirectory.resolve("main.lua").readText(Charsets.UTF_8))
+        val writable = method == "execute" || standalone && method in setOf("synthesize", "tts_control", "voice_command",
+            "recognize", "recognize_stream", "asr_control", "close")
+        globals.set("host", host(project, writable, coroutine, budget, globals, sourceDirectory, context.locale))
+        val entry = sourceDirectory.resolve("main.lua")
+        val prototype = if (standalone) synchronized(this@LuaExecutor) {
+            standalonePrototype ?: compile(entry.readText(Charsets.UTF_8)).also { standalonePrototype = it }
+        } else compile(entry.readText(Charsets.UTF_8))
         try {
             val exports = LuaClosure(prototype, globals).call().checktable()
             val function = exports.get(method)
             if (function.isnil()) return@withContext when (method) { "pages" -> JsonArray(emptyList()); "contributions" -> JsonObject(emptyMap()); else -> JsonNull }
             require(function.isfunction()) { "$method 必须是函数" }
             val ctx = LuaJson.toLua(PluginJson.encodeToJsonElement(PluginContext.serializer(), context))
-            val value = if (action != null) function.call(LuaValue.valueOf(action), ctx) else function.call(ctx)
+            val value = when {
+                action != null -> function.call(LuaValue.valueOf(action), ctx)
+                input != null -> function.call(LuaJson.toLua(input), ctx)
+                else -> function.call(ctx)
+            }
             coroutine.ensureActive(); LuaJson.result(value)
         } catch (failure: Exception) { coroutine.ensureActive(); throw failure }
     }
+    private var standalonePrototype: Prototype? = null
     private fun compile(source: String, name: String = "main.lua"): Prototype {
         val bytes = source.toByteArray(Charsets.UTF_8)
         require(bytes.size in 1..LuaSourceStore.SOURCE_LIMIT && bytes.first() != 27.toByte() && bytes.none { it == 0.toByte() }) { "只允许 UTF-8 源代码" }
@@ -76,6 +88,23 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
         val assets = sourceDirectory.resolve("assets")
         val modules = mutableMapOf<String, LuaValue>()
         val loading = mutableSetOf<String>()
+        fun availableAsset(path: String): File {
+            val original = scoped(assets, path)
+            require(original.isFile && standalone)
+            val version = sourceDirectory.parentFile?.parentFile?.name.orEmpty()
+            require(version.matches(Regex("[A-Za-z0-9_.-]+")))
+            val target = environment.storage.file("lua-assets/$version/$path")
+            if (!target.isFile) {
+                val directory = requireNotNull(target.parentFile)
+                directory.mkdirs()
+                val temporary = File.createTempFile("asset-", ".part", directory)
+                try {
+                    original.copyTo(temporary, overwrite = true)
+                    check(temporary.renameTo(target) || target.isFile)
+                } finally { temporary.delete() }
+            }
+            return target
+        }
         fun gate(permission: String) { require(permission in permissions) { "未授予 $permission" }; budget.check() }
         fun function(body: (Varargs) -> LuaValue) = object : VarArgFunction() {
             override fun invoke(args: Varargs): Varargs { coroutine.ensureActive(); budget.check(); return body(args) }
@@ -87,7 +116,8 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
                     val path = value.getValue("path").jsonPrimitive.content
                     require(path.startsWith("data/") || path.startsWith("assets/")) { "资源须位于本工具的 data/ 或 assets/" }
                     val local = path.substringAfter('/')
-                    val file = if (path.startsWith("data/")) data.file(local) else scoped(assets, local)
+                    val file = if (path.startsWith("data/")) data.file(local)
+                        else if (standalone) availableAsset(local) else scoped(assets, local)
                     buildJsonObject { put("path", file.relativeTo(environment.storage.root).invariantSeparatorsPath) }
                 } else rewriteResources(value)
             })
@@ -129,9 +159,15 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
                 }
             })
             host.set("app", function { args ->
-                gate("app-control")
                 val command = PluginJson.decodeFromJsonElement(AppCommand.serializer(), LuaJson.result(args.arg1()))
-                require(command is AppCommand.Describe || command is AppCommand.State || command is AppCommand.Navigate || command is AppCommand.SetText || command is AppCommand.SetAutomaticRead || command is AppCommand.Speak || command is AppCommand.StopSpeech || command is AppCommand.Setting) { "Lua 工具不能调用插件管理操作" }
+                gate(when {
+                    standalone && command is AppCommand.Overlay -> "overlay"
+                    standalone && command is AppCommand.Notifications -> "notifications"
+                    else -> "app-control"
+                })
+                require(standalone || command is AppCommand.Describe || command is AppCommand.State || command is AppCommand.Navigate ||
+                    command is AppCommand.SetText || command is AppCommand.SetAutomaticRead || command is AppCommand.Speak ||
+                    command is AppCommand.StopSpeech || command is AppCommand.Setting) { "Lua 工具不能调用插件管理操作" }
                 require(writable || command is AppCommand.Describe || command is AppCommand.State) { "页面刷新只能读取数据" }
                 val reply = budget.io { runBlocking(coroutine + Dispatchers.IO) { withTimeout(125_000) { managed(project, "app", PluginJson.encodeToJsonElement(AppCommand.serializer(), command).jsonObject) } } }
                 LuaJson.toLua(reply)
@@ -176,15 +212,101 @@ class LuaExecutor(private val environment: PluginEnvironment, private val store:
                     val file = data.file(args.checkjstring(1))
                     val files = data.root.walkTopDown().filter { it.isFile }.toList()
                     require((file.isFile || files.size < 128) && files.sumOf { it.length() } - file.length() + value.toByteArray().size <= 4 * 1024 * 1024)
-                    file.parentFile.mkdirs(); file.writeText(value, Charsets.UTF_8); LuaValue.TRUE
+                    requireNotNull(file.parentFile).mkdirs(); file.writeText(value, Charsets.UTF_8); LuaValue.TRUE
                 })
             })
             host.set("asset", LuaTable().also { functions ->
                 functions.set("read", function { args -> val file = scoped(assets, args.checkjstring(1)); require(file.isFile && file.length() <= 256 * 1024); LuaValue.valueOf(file.readText(Charsets.UTF_8)) })
+                if (standalone) functions.set("path", function { args ->
+                    LuaValue.valueOf(availableAsset(args.checkjstring(1)).relativeTo(environment.storage.root).invariantSeparatorsPath)
+                })
+            })
+            if (standalone) host.set("path", function { args ->
+                LuaValue.valueOf(data.file(args.checkjstring(1)).relativeTo(environment.storage.root).invariantSeparatorsPath)
+            })
+            if (standalone) host.set("download", function { args ->
+                gate("network")
+                require(writable) { "页面刷新不能下载文件" }
+                val target = data.file(args.checkjstring(2)).relativeTo(environment.storage.root).invariantSeparatorsPath
+                budget.io {
+                    runBlocking(coroutine + Dispatchers.IO) {
+                        withTimeout(125_000) {
+                            environment.download(args.checkjstring(1), target, args.optjstring(3, "").ifBlank { null })
+                        }
+                    }
+                }
+                LuaValue.valueOf(target)
+            })
+            if (standalone) host.set("http", function { args ->
+                gate("network")
+                require(writable)
+                val input = LuaJson.result(args.arg1()).jsonObject
+                val result = budget.io {
+                    runBlocking(coroutine + Dispatchers.IO) {
+                        withTimeout(125_000) {
+                            environment.requirePermission("network")
+                            luaHttp(input, data)
+                        }
+                    }
+                }
+                LuaJson.toLua(result)
+            })
+            if (standalone) {
+                fun voiceBroker(permission: String, run: suspend (JsonObject) -> JsonElement) = function { args ->
+                    gate(permission)
+                    val command = LuaJson.result(args.arg1()).jsonObject
+                    require(writable || command["operation"]?.jsonPrimitive?.content == "providers")
+                    val result = budget.io {
+                        runBlocking(coroutine + Dispatchers.IO) {
+                            withTimeout(125_000) {
+                                environment.requirePermission(permission)
+                                run(command)
+                            }
+                        }
+                    }
+                    require(result.toString().toByteArray().size <= LuaJson.LIMIT)
+                    LuaJson.toLua(result)
+                }
+                host.set("speech", voiceBroker("speech-service") { command ->
+                    luaSpeechBroker(requireNotNull(environment.speechBroker), data, command)
+                })
+                host.set("recognition", voiceBroker("asr-service") { command ->
+                    luaRecognitionBroker(requireNotNull(environment.recognitionBroker), data, command)
+                })
+            }
+            if (standalone) host.set("binary", LuaTable().also { binary ->
+                binary.set("read", function { args ->
+                    val file = data.file(args.checkjstring(1))
+                    val offset = args.optlong(2, 0)
+                    val count = args.optint(3, 65536)
+                    require(offset in 0L..file.length() && count in 1..65536)
+                    val bytes = ByteArray(minOf(count.toLong(), file.length() - offset).toInt())
+                    RandomAccessFile(file, "r").use { stream -> stream.seek(offset); stream.readFully(bytes) }
+                    LuaValue.valueOf(java.util.Base64.getEncoder().encodeToString(bytes))
+                })
+                binary.set("write", function { args ->
+                    require(writable)
+                    val file = data.file(args.checkjstring(1))
+                    val bytes = java.util.Base64.getDecoder().decode(args.checkjstring(2).also { require(it.length <= 90000) })
+                    val append = args.optboolean(3, false)
+                    require(bytes.size <= 65536 && (if (append) file.length() else 0L) + bytes.size <= LuaSpeech.MAX_PCM)
+                    requireNotNull(file.parentFile).mkdirs()
+                    java.io.FileOutputStream(file, append).use { it.write(bytes) }
+                    LuaValue.TRUE
+                })
             })
         }
     }
     private suspend fun managed(project: LuaProject, channel: String, command: JsonObject): JsonElement {
+        if (standalone) return when (channel) {
+            "app" -> PluginJson.encodeToJsonElement(AppReply.serializer(),
+                requireNotNull(environment.appBroker).request(PluginJson.decodeFromJsonElement(AppCommand.serializer(), command)))
+            "quick" -> PluginJson.encodeToJsonElement(QuickTextReply.serializer(),
+                requireNotNull(environment.quickTextBroker).request(PluginJson.decodeFromJsonElement(QuickTextCommand.serializer(), command)))
+            "stickers" -> PluginJson.encodeToJsonElement(StickerReply.serializer(),
+                requireNotNull(environment.stickerBroker).request(PluginJson.decodeFromJsonElement(StickerCommand.serializer(), command)))
+            else -> error("Unsupported broker")
+        }
         val reply = environment.appBroker?.request(AppCommand.ManagedCall(project.manifest.id, channel, command))
             ?: error("PERMISSION_REQUIRED: 宿主未提供项目权限代理")
         if (reply is AppReply.Failure) error((if (reply.code == "PERMISSION_DENIED") "PERMISSION_REQUIRED: " else "") + reply.message)

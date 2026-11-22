@@ -9,12 +9,14 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
             PageAction("choose", copy("import"), PluginIcon.ADD), PageAction("create", copy("new"), PluginIcon.EDIT))))),
         PageBlock.Group(copy("build"), listOf(PageBlock.Actions(listOf(PageAction("native-builder", copy("java"), PluginIcon.TEXT))))),
     ), ManagementList("lua-projects", projects.map { project ->
-        ManagementItem(project.manifest.id, project.manifest.name, if (project.error.isEmpty()) project.manifest.version else copy("dialog.project_failed"), PluginIcon.TEXT,
-            primaryAction = "project/${project.manifest.id}", toggle = ManagementToggle(project.enabled, "enable/${project.manifest.id}"))
+        ManagementItem(project.manifest.id, project.manifest.name, if (project.error.isEmpty()) project.manifest.version else copy("dialog.project_failed"), PluginIcon.TEXT, symbol = project.manifest.icon,
+            primaryAction = "project/${project.manifest.id}")
     }, emptyText = copy("empty")))
     fun project(project: LuaProject) = PluginPage("project/${project.manifest.id}", project.manifest.name, listOf(
         PageBlock.Group(copy("tool"), listOf(
-            PageBlock.Toggle(copy("enable"), project.enabled, "enable/${project.manifest.id}", icon = PluginIcon.SETTINGS),
+            PageBlock.Actions(listOf(PageAction("debug/${project.manifest.id}", copy("debugBuild"), PluginIcon.SETTINGS))),
+            PageBlock.Actions(listOf(PageAction("rename/${project.manifest.id}", copy("dialog.name"), PluginIcon.EDIT),
+                PageAction("icon/${project.manifest.id}", copy("dialog.icon"), PluginIcon.IMAGE))),
             PageBlock.Actions(listOf(PageAction("files/${project.manifest.id}", copy("files"), PluginIcon.MENU),
                 PageAction("test/${project.manifest.id}", copy("test"), PluginIcon.TEXT),
                 PageAction("export/${project.manifest.id}", copy("export"), PluginIcon.EXPORT),
@@ -22,13 +24,13 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
         )),
         PageBlock.Group(copy("permissions"), listOf(PageBlock.Text(permissions(project.manifest)))),
     ) + if (project.error.isNotEmpty()) listOf(PageBlock.Notice(copy("dialog.project_failed"))) else emptyList())
-    fun review(pending: LuaPending, previous: LuaProject?) = PluginPage("review/${pending.token}", if (previous == null) copy("install") else copy("update"), listOf(
+    fun review(pending: LuaPending, previous: LuaProject?) = PluginPage("review/${pending.token}", if (previous == null) copy("import") else copy("update"), listOf(
         PageBlock.Group(pending.manifest.name, listOf(PageBlock.Text(copy("version", "version" to pending.manifest.version)), PageBlock.Text(permissions(pending.manifest)),
             PageBlock.Notice(copy("review")))),
         PageBlock.Group(copy("source"), listOf(PageBlock.Text(pending.directory.resolve("main.lua").readText(Charsets.UTF_8).take(12000)),
             PageBlock.Actions(listOf(PageAction("review-files/${pending.token}", copy("edit"), PluginIcon.EDIT),
                 PageAction("review-export/${pending.token}", copy("exportSource"), PluginIcon.EXPORT))))),
-        PageBlock.Actions(listOf(PageAction("confirm/${pending.token}", if (previous == null) copy("installEnable") else copy("saveEnable"), PluginIcon.ADD))),
+        PageBlock.Actions(listOf(PageAction("confirm/${pending.token}", copy("save"), PluginIcon.ADD))),
     ))
     fun delete(project: LuaProject) = PluginPage("delete/${project.manifest.id}", copy("deleteTitle"), listOf(
         PageBlock.Notice(copy("deleteBody", "name" to project.manifest.name)),

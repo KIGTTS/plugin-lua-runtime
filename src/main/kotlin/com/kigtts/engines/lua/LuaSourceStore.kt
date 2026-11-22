@@ -12,7 +12,8 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import java.util.zip.ZipEntry
 
-data class LuaManifest(val id: String, val name: String, val version: String, val permissions: Set<String>, val permissionPurposes: Map<String, String> = emptyMap())
+data class LuaManifest(val id: String, val name: String, val version: String, val permissions: Set<String>,
+    val permissionPurposes: Map<String, String> = emptyMap(), val icon: String? = null)
 data class LuaProject(val manifest: LuaManifest, val enabled: Boolean, val hash: String, val error: String = "")
 data class LuaPending(val token: String, val manifest: LuaManifest, val hash: String, val directory: File)
 
@@ -22,7 +23,9 @@ class LuaSourceStore(private val storage: PluginStorage) {
         const val SOURCE_LIMIT = 256 * 1024
         const val FILE_LIMIT = 128
         const val TOTAL_LIMIT = 16 * 1024 * 1024L
-        val PERMISSIONS = setOf("app-control", "quick-text-read", "quick-text-write", "stickers-read", "stickers-write")
+        val PERMISSIONS = setOf("app-control", "quick-text-read", "quick-text-write", "stickers-read", "stickers-write",
+            "network", "overlay", "notifications", "resources", "background-work",
+            "tts", "asr-batch", "asr-segmented", "asr-incremental", "voice-packs", "speech-service", "asr-service")
         private val ID = Regex("[a-z][a-z0-9.-]{0,63}")
     }
     private val records = linkedMapOf<String, LuaProject>()
@@ -45,13 +48,14 @@ class LuaSourceStore(private val storage: PluginStorage) {
     fun verify(project: LuaProject) { require(hash(code(project.manifest.id)) == project.hash) { throw LuaEditorIssue("issue.reimport", "源文件已变化，需要重新导入并确认") } }
     fun stage(source: File): LuaPending {
         require(source.canonicalFile.toPath().startsWith(storage.root.canonicalFile.toPath())) { throw LuaEditorIssue("issue.owner", "资源不属于 Lua 插件") }
+        require(source.isDirectory || !source.extension.equals("kiglua", ignoreCase = true)) {
+            throw LuaEditorIssue("issue.legacy_package", "请选择源码 ZIP 或已签名的插件包")
+        }
         val token = UUID.randomUUID().toString()
         val target = storage.directory("staging/$token")
         try {
             if (source.isDirectory) copyPackage(source, target) else unzip(source, target)
-            val manifestFile = target.resolve("manifest.json")
-            require(manifestFile.isFile && manifestFile.length() <= 16 * 1024) { throw LuaEditorIssue("issue.manifest", "缺少有效 manifest.json") }
-            val parsed = manifest(PluginJson.parseToJsonElement(utf8(manifestFile.readBytes())).jsonObject)
+            val parsed = readManifest(target.resolve("manifest.json"))
             val script = target.resolve("main.lua")
             require(script.isFile && script.length() in 1..SOURCE_LIMIT.toLong()) { throw LuaEditorIssue("issue.script_size", "main.lua 为空或超过 256 KiB") }
             utf8(script.readBytes()) // Reject bytecode/invalid UTF-8 without execution.
@@ -64,7 +68,7 @@ class LuaSourceStore(private val storage: PluginStorage) {
         require(dir.isDirectory) { throw LuaEditorIssue("issue.pending_missing", "待确认工具不存在") }
         return LuaPending(token, manifest(PluginJson.parseToJsonElement(utf8(dir.resolve("manifest.json").readBytes())).jsonObject), hash(dir), dir)
     }
-    @Synchronized fun confirm(pending: LuaPending): LuaProject {
+    @Synchronized fun confirm(pending: LuaPending, enabled: Boolean = true): LuaProject {
         require(hash(pending.directory) == pending.hash) { throw LuaEditorIssue("issue.source_changed", "源文件已变化，请重新检查") }
         require(records.size < 32 || pending.manifest.id in records) { throw LuaEditorIssue("issue.project_limit", "最多可安装 32 个 Lua 工具") }
         val project = storage.directory("projects/${pending.manifest.id}")
@@ -74,7 +78,7 @@ class LuaSourceStore(private val storage: PluginStorage) {
         if (code.exists()) require(code.renameTo(old)) { throw LuaEditorIssue("issue.backup_failed", "不能备份旧版本") }
         try {
             require(pending.directory.renameTo(code)) { throw LuaEditorIssue("issue.save_failed", "不能保存工具") }
-            val installed = LuaProject(pending.manifest, true, pending.hash)
+            val installed = LuaProject(pending.manifest, enabled, pending.hash)
             records[pending.manifest.id] = installed
             save()
             old.deleteRecursively()
@@ -99,7 +103,7 @@ class LuaSourceStore(private val storage: PluginStorage) {
         return stage(draft).also { draft.deleteRecursively() }
     }
     fun export(id: String): File {
-        val destination = storage.file("exports/${safeId(id)}.kiglua").also { it.parentFile.mkdirs() }
+        val destination = storage.file("exports/${safeId(id)}-source.zip").also { it.parentFile.mkdirs() }
         ZipOutputStream(destination.outputStream()).use { out ->
             code(id).walkTopDown().filter { it != code(id) }.sortedBy { it.relativeTo(code(id)).invariantSeparatorsPath }.forEach { file ->
                 out.putNextEntry(ZipEntry(file.relativeTo(code(id)).invariantSeparatorsPath + if (file.isDirectory) "/" else ""))
@@ -162,7 +166,35 @@ class LuaSourceStore(private val storage: PluginStorage) {
         require(PERMISSIONS.containsAll(permissions)) { throw LuaEditorIssue("issue.unsupported_permission", "申请了不支持的权限") }
         val purposes = value["permissionPurposes"]?.jsonObject?.mapValues { it.value.jsonPrimitive.content }.orEmpty()
         require(purposes.size <= permissions.size && purposes.all { (key, text) -> key in permissions && text.length in 1..600 }) { throw LuaEditorIssue("issue.permission_purpose", "权限用途声明无效") }
-        return LuaManifest(id, name, version, permissions, purposes)
+        val icon = value["icon"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+        require(icon == null || icon.matches(Regex("[a-z][a-z0-9_]{0,79}"))) { throw LuaEditorIssue("issue.metadata", "名称或图标无效") }
+        return LuaManifest(id, name, version, permissions, purposes, icon)
+    }
+    internal fun readManifest(file: File): LuaManifest {
+        require(file.isFile && file.length() in 1..(16L * 1024)) { throw LuaEditorIssue("issue.manifest", "缺少有效 manifest.json") }
+        return manifest(PluginJson.parseToJsonElement(utf8(file.readBytes())).jsonObject)
+    }
+
+    @Synchronized fun updatePresentation(id: String, name: String? = null, icon: String? = null): LuaProject {
+        val current = project(id)
+        verify(current)
+        val file = code(id).resolve("manifest.json")
+        val raw = utf8(file.readBytes())
+        val changes = PluginJson.parseToJsonElement(raw).jsonObject.toMutableMap()
+        name?.trim()?.let { require(it.isNotBlank()); changes["name"] = JsonPrimitive(it) }
+        icon?.trim()?.let { if (it.isEmpty()) changes.remove("icon") else changes["icon"] = JsonPrimitive(it) }
+        val updated = manifest(JsonObject(changes))
+        try {
+            file.writeText(JsonObject(changes).toString(), Charsets.UTF_8)
+            val next = current.copy(manifest = updated, hash = hash(code(id)))
+            records[id] = next
+            save()
+            return next
+        } catch (failure: Exception) {
+            file.writeText(raw, Charsets.UTF_8)
+            records[id] = current
+            throw failure
+        }
     }
     private fun safeId(id: String) = id.also { require(ID.matches(id)) { throw LuaEditorIssue("issue.invalid_id", "无效工具 ID") } }
     private fun hash(directory: File): String {
@@ -178,7 +210,8 @@ class LuaSourceStore(private val storage: PluginStorage) {
         val temp = index.resolveSibling("projects.pending.json")
         temp.writeText(JsonArray(records.values.map { record -> buildJsonObject {
             put("manifest", buildJsonObject { put("id", record.manifest.id); put("name", record.manifest.name); put("version", record.manifest.version)
-                put("permissions", JsonArray(record.manifest.permissions.sorted().map(::JsonPrimitive))); put("permissionPurposes", JsonObject(record.manifest.permissionPurposes.mapValues { JsonPrimitive(it.value) })) })
+                put("permissions", JsonArray(record.manifest.permissions.sorted().map(::JsonPrimitive))); put("permissionPurposes", JsonObject(record.manifest.permissionPurposes.mapValues { JsonPrimitive(it.value) }))
+                record.manifest.icon?.let { put("icon", it) } })
             put("enabled", record.enabled); put("hash", record.hash); put("error", record.error)
         } }).toString(), Charsets.UTF_8)
         java.nio.file.Files.move(temp.toPath(), index.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)

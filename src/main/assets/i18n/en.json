@@ -10,6 +10,7 @@
   "empty": "Import or create a Lua tool",
   "tool": "Tool",
   "enable": "Enable",
+  "debugBuild": "Build and enable debugging",
   "files": "Project files",
   "test": "Test",
   "export": "Export",
@@ -117,5 +118,7 @@
   "issue.invalid_id": "Invalid tool ID",
   "issue.utf8": "Use UTF-8 source files",
   "issue.unknown_agent": "Unknown Lua debug action",
-  "list.separator": ", "
+  "list.separator": ", ",
+  "dialog.icon": "Material icon name",
+  "issue.legacy_package": "Choose a source ZIP, or install a signed package from Plugins"
 }

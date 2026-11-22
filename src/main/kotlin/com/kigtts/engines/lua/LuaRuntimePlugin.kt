@@ -12,7 +12,7 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑、导入和管理 Lua 工具", "0.9.6")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.7")
     override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
     private var strings = PluginStrings(emptyMap())
     private fun copy(key: String) = strings.text(key, uiLocale)
@@ -23,6 +23,7 @@ class LuaRuntimePlugin : KigPlugin {
     private lateinit var store: LuaSourceStore
     private lateinit var executor: LuaExecutor
     private lateinit var files: LuaDraftFiles
+    private lateinit var packages: LuaPackageWriter
     private val mutex = Mutex()
     private val revisions = MutableStateFlow(0L)
     override val uiChanges get() = revisions
@@ -34,6 +35,7 @@ class LuaRuntimePlugin : KigPlugin {
     private val reviews = mutableMapOf<String, LuaPending>()
     override suspend fun attach(environment: PluginEnvironment) {
         this.environment = environment; store = LuaSourceStore(environment.storage); executor = LuaExecutor(environment, store); files = LuaDraftFiles(environment.storage, store)
+        packages = LuaPackageWriter(environment, store)
         strings = PluginStrings.fromAssets(environment.assets)
         uiLocale = environment.locale
         for (project in store.projects().filter { it.enabled }) refresh(project, PluginContext("", "", locale = uiLocale))
@@ -42,7 +44,7 @@ class LuaRuntimePlugin : KigPlugin {
         PluginContributions(actions = ui.values.flatMap { it.contributions.actions },
             drawerEntries = listOf(DrawerEntry("manager", copy("title"), "manager", PluginIcon.EDIT)) + ui.values.flatMap { it.contributions.drawerEntries },
             automationActions = listOf("import", "agent-install", "agent"),
-            managedPackages = store.projects().map { ManagedPackage(it.manifest.id, it.manifest.version, "lua", it.enabled, it.manifest.name, it.manifest.permissions, it.manifest.permissionPurposes, "project/${it.manifest.id}", "manage-enable/${it.manifest.id}", "manage-remove/${it.manifest.id}", it.error) },
+            managedPackages = store.projects().filter { it.enabled }.map { ManagedPackage(it.manifest.id, it.manifest.version, "lua", it.enabled, it.manifest.name, it.manifest.permissions, it.manifest.permissionPurposes, "project/${it.manifest.id}", "manage-enable/${it.manifest.id}", null, it.error) },
             settingsEntries = listOf(SettingsEntry("editor", copy("title"), "manager", PluginIcon.EDIT,
                 cardId = "developer", cardTitle = copy("developer"), summary = copy("summary"))) + ui.values.flatMap { it.contributions.settingsEntries })
     }
@@ -157,28 +159,39 @@ class LuaRuntimePlugin : KigPlugin {
             }
             "choose" -> PluginOutcome.ImportResource(copy(context, "import"), "imports", "import", zip = true, mimeTypes = listOf("application/zip", "application/octet-stream"))
             "import" -> review(store.stage(environment.storage.file(requireNotNull(context.inputs["resourcePath"]))))
-            "create" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "create-name")
-            "native-builder" -> {
-                when (val reply = environment.appBroker?.request(AppCommand.PluginAction("tools.native-builder", "open"))) {
-                    is AppReply.Failure -> PluginOutcome.Message(copy(context, "issue.install_builder"))
-                    is AppReply.Data -> PluginOutcome.RefreshUi
-                    else -> PluginOutcome.Message(copy(context, "issue.builder_unavailable"))
-                }
-            }
+            "create" -> PluginOutcome.Menu(copy(context, "new"), listOf(
+                PageAction("create-lua", "Lua", PluginIcon.TEXT),
+                PageAction("create-native", copy(context, "java"), PluginIcon.TEXT)))
+            "create-lua" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "create-name")
+            "native-builder", "create-native" -> NativeBuilderLink.open(environment, if (action == "create-native") "new" else "open")
             "create-name" -> create(context.inputs["value"].orEmpty())
             "confirm" -> {
                 require(context.inputs["_callerPlugin"] == null) { throw LuaEditorIssue("issue.manual_confirm", "请在检查页面手动确认") }
                 val pending = reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新，请重新打开")
                 executor.validate(pending.directory.resolve("main.lua").readText(Charsets.UTF_8))
-                val project = store.confirm(pending); synchronized(transient) { transient.remove("review/$id") }
+                val enabled = store.projects().firstOrNull { it.manifest.id == pending.manifest.id }?.enabled == true
+                val project = store.confirm(pending, enabled); synchronized(transient) { transient.remove("review/$id") }
                 reviews.remove(id)
-                refresh(project, context); open(pages.project(store.project(project.manifest.id)))
+                if (enabled) refresh(project, context)
+                open(pages.project(store.project(project.manifest.id)))
             }
             "review-files" -> open(pages.files(files.inspect(reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")), files))
             "review-export" -> (reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新")).let { pending ->
                 PluginOutcome.ExportResource(copy(context, "exportSource"), PluginResource(pending.directory.resolve("main.lua").relativeTo(environment.storage.root).invariantSeparatorsPath), "main.lua", "text/plain")
             }
             "project" -> open(pages.project(store.project(id)))
+            "rename" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "save-name/$id",
+                initialValue = store.project(id).manifest.name)
+            "icon" -> PluginOutcome.TextInput(copy(context, "dialog.icon"), "save-icon/$id",
+                initialValue = store.project(id).manifest.icon.orEmpty())
+            "save-name", "save-icon" -> {
+                require(context.inputs["_callerPlugin"] == null)
+                val value = context.inputs["value"].orEmpty()
+                val updated = if (action == "save-name") store.updatePresentation(id, name = value)
+                    else store.updatePresentation(id, icon = value)
+                if (updated.enabled) refresh(updated, context)
+                open(pages.project(updated))
+            }
             "enable" -> {
                 val project = store.project(id)
                 if (!project.enabled) {
@@ -193,9 +206,22 @@ class LuaRuntimePlugin : KigPlugin {
                 synchronized(transient) { transient.entries.removeAll { it.value.id == "project/$id" || it.value.id == "delete/$id" } }
                 PluginOutcome.OpenPage("manager")
             }
-            "export" -> store.export(id).let { PluginOutcome.ExportResource("导出工具", PluginResource(it.relativeTo(environment.storage.root).invariantSeparatorsPath), "$id.kiglua", "application/zip") }
+            "debug" -> {
+                require(context.inputs["_callerPlugin"] == null)
+                val project = store.project(id)
+                val file = packages.write(project, development = true)
+                if (project.enabled) {
+                    store.enabled(id, false)
+                    synchronized(ui) { ui.remove(id) }
+                }
+                PluginOutcome.InstallPackage(PluginResource(file.relativeTo(environment.storage.root).invariantSeparatorsPath))
+            }
+            "export" -> packages.write(store.project(id)).let {
+                PluginOutcome.ExportResource(copy(context, "export"), PluginResource(it.relativeTo(environment.storage.root).invariantSeparatorsPath),
+                    it.name, "application/octet-stream")
+            }
             "test" -> {
-                val project = store.project(id); require(project.enabled) { throw LuaEditorIssue("issue.test_disabled", "请先检查并启用工具") }
+                val project = store.project(id); store.verify(project)
                 val value = executor.call(project, "test", context)
                 PluginOutcome.Dialog(copy(context, "dialog.test_result"), if (value == JsonNull) copy(context, "dialog.test_passed") else value.toString().take(16000))
             }
@@ -308,7 +334,8 @@ class LuaRuntimePlugin : KigPlugin {
         val id = "tool-${UUID.randomUUID().toString().take(8)}"
         draft.resolve("manifest.json").writeText(buildJsonObject { put("id", id); put("name", name); put("version", "0.1.0"); put("permissions", JsonArray(emptyList())) }.toString(), Charsets.UTF_8)
         draft.resolve("main.lua").writeText("return {\n  contributions = function(ctx) return {} end,\n  pages = function(ctx) return {} end,\n  execute = function(action, ctx) return {type='message', text='完成'} end\n}\n", Charsets.UTF_8)
-        return review(store.stage(draft)).also { draft.deleteRecursively() }
+        return try { open(pages.project(store.confirm(store.stage(draft), enabled = false))) }
+        finally { draft.deleteRecursively() }
     }
     private fun operation(draft: LuaDraft, context: PluginContext): PluginOutcome {
         val paths = PluginJson.decodeFromString<List<String>>(requireNotNull(context.inputs["paths"]))
