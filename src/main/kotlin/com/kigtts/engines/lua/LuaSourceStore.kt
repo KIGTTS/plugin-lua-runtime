@@ -13,7 +13,8 @@ import java.util.zip.ZipOutputStream
 import java.util.zip.ZipEntry
 
 data class LuaManifest(val id: String, val name: String, val version: String, val permissions: Set<String>,
-    val permissionPurposes: Map<String, String> = emptyMap(), val icon: String? = null)
+    val permissionPurposes: Map<String, String> = emptyMap(), val icon: String? = null,
+    val iconPath: String? = null, val author: String = "")
 data class LuaProject(val manifest: LuaManifest, val enabled: Boolean, val hash: String, val error: String = "")
 data class LuaPending(val token: String, val manifest: LuaManifest, val hash: String, val directory: File)
 
@@ -26,7 +27,7 @@ class LuaSourceStore(private val storage: PluginStorage) {
         val PERMISSIONS = setOf("app-control", "quick-text-read", "quick-text-write", "stickers-read", "stickers-write",
             "network", "overlay", "notifications", "resources", "background-work",
             "tts", "asr-batch", "asr-segmented", "asr-incremental", "voice-packs", "speech-service", "asr-service")
-        private val ID = Regex("[a-z][a-z0-9.-]{0,63}")
+        private val ID = Regex("[a-z][a-z0-9.-]{0,79}")
     }
     private val records = linkedMapOf<String, LuaProject>()
     init {
@@ -168,29 +169,48 @@ class LuaSourceStore(private val storage: PluginStorage) {
         require(purposes.size <= permissions.size && purposes.all { (key, text) -> key in permissions && text.length in 1..600 }) { throw LuaEditorIssue("issue.permission_purpose", "权限用途声明无效") }
         val icon = value["icon"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
         require(icon == null || icon.matches(Regex("[a-z][a-z0-9_]{0,79}"))) { throw LuaEditorIssue("issue.metadata", "名称或图标无效") }
-        return LuaManifest(id, name, version, permissions, purposes, icon)
+        val iconPath = value["iconPath"]?.jsonPrimitive?.contentOrNull
+        require(iconPath == null || icon == null && safePath(iconPath).startsWith("assets/") &&
+            iconPath.substringAfterLast('.').lowercase() in setOf("png", "jpg", "jpeg", "svg", "webp"))
+        val author = value["author"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        require(author.length <= 120)
+        return LuaManifest(id, name, version, permissions, purposes, icon, iconPath, author)
     }
     internal fun readManifest(file: File): LuaManifest {
         require(file.isFile && file.length() in 1..(16L * 1024)) { throw LuaEditorIssue("issue.manifest", "缺少有效 manifest.json") }
         return manifest(PluginJson.parseToJsonElement(utf8(file.readBytes())).jsonObject)
     }
 
-    @Synchronized fun updatePresentation(id: String, name: String? = null, icon: String? = null): LuaProject {
+    @Synchronized fun updatePresentation(id: String, name: String? = null, icon: String? = null,
+        image: File? = null, author: String? = null): LuaProject {
         val current = project(id)
         verify(current)
         val file = code(id).resolve("manifest.json")
         val raw = utf8(file.readBytes())
         val changes = PluginJson.parseToJsonElement(raw).jsonObject.toMutableMap()
         name?.trim()?.let { require(it.isNotBlank()); changes["name"] = JsonPrimitive(it) }
-        icon?.trim()?.let { if (it.isEmpty()) changes.remove("icon") else changes["icon"] = JsonPrimitive(it) }
+        author?.trim()?.let { changes["author"] = JsonPrimitive(it) }
+        icon?.trim()?.let {
+            changes.remove("iconPath")
+            if (it.isEmpty()) changes.remove("icon") else changes["icon"] = JsonPrimitive(it)
+        }
+        val artwork = image?.let {
+            require(it.isFile && it.extension in setOf("png", "svg") && it.length() in 1..1_048_576L)
+            val path = "assets/project-icon-${UUID.randomUUID()}.${it.extension}"
+            changes.remove("icon")
+            changes["iconPath"] = JsonPrimitive(path)
+            code(id).resolve(path)
+        }
         val updated = manifest(JsonObject(changes))
         try {
+            if (artwork != null) { artwork.parentFile?.mkdirs(); requireNotNull(image).copyTo(artwork) }
             file.writeText(JsonObject(changes).toString(), Charsets.UTF_8)
             val next = current.copy(manifest = updated, hash = hash(code(id)))
             records[id] = next
             save()
             return next
         } catch (failure: Exception) {
+            artwork?.delete()
             file.writeText(raw, Charsets.UTF_8)
             records[id] = current
             throw failure
@@ -211,7 +231,9 @@ class LuaSourceStore(private val storage: PluginStorage) {
         temp.writeText(JsonArray(records.values.map { record -> buildJsonObject {
             put("manifest", buildJsonObject { put("id", record.manifest.id); put("name", record.manifest.name); put("version", record.manifest.version)
                 put("permissions", JsonArray(record.manifest.permissions.sorted().map(::JsonPrimitive))); put("permissionPurposes", JsonObject(record.manifest.permissionPurposes.mapValues { JsonPrimitive(it.value) }))
-                record.manifest.icon?.let { put("icon", it) } })
+                record.manifest.icon?.let { put("icon", it) }
+                record.manifest.iconPath?.let { put("iconPath", it) }
+                if (record.manifest.author.isNotBlank()) put("author", record.manifest.author) })
             put("enabled", record.enabled); put("hash", record.hash); put("error", record.error)
         } }).toString(), Charsets.UTF_8)
         java.nio.file.Files.move(temp.toPath(), index.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)

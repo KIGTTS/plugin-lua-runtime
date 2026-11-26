@@ -12,7 +12,7 @@ import java.io.File
 import java.util.UUID
 
 class LuaRuntimePlugin : KigPlugin {
-    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.11")
+    override val descriptor = PluginDescriptor("runtime.lua", "插件编辑器", "编辑和调试插件项目", "0.9.12")
     override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "en", "ko", "ja"))
     private var strings = PluginStrings(emptyMap())
     private fun copy(key: String) = strings.text(key, uiLocale)
@@ -171,6 +171,24 @@ class LuaRuntimePlugin : KigPlugin {
             "create-lua" -> PluginOutcome.TextInput(copy(context, "dialog.name"), "create-name")
             "native-builder", "create-native" -> NativeBuilderLink.open(environment, if (action == "create-native") "new" else "open")
             "create-name" -> create(context.inputs["value"].orEmpty())
+            "editor-create" -> {
+                require(context.inputs["_callerPlugin"] == null)
+                val packageName = requireNotNull(context.inputs["id"])
+                require(packageName.matches(Regex("[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*){1,7}")))
+                create(context.inputs["name"].orEmpty(), packageName, context.inputs["author"].orEmpty())
+            }
+            "editor-preset" -> {
+                require(context.inputs["_callerPlugin"] == null)
+                val path = requireNotNull(context.inputs["resourcePath"])
+                require(path.startsWith("imports/presets/"))
+                val source = environment.storage.file(path)
+                val pending = try { store.stage(source) } finally { source.deleteRecursively() }
+                if (store.projects().any { it.manifest.id == pending.manifest.id }) {
+                    pending.directory.deleteRecursively()
+                    throw LuaEditorIssue("issue.metadata", "包名已经存在")
+                }
+                review(pending)
+            }
             "confirm" -> {
                 require(context.inputs["_callerPlugin"] == null) { throw LuaEditorIssue("issue.manual_confirm", "请在检查页面手动确认") }
                 val pending = reviews[id] ?: throw LuaEditorIssue("issue.review_expired", "检查页面已更新，请重新打开")
@@ -197,6 +215,18 @@ class LuaRuntimePlugin : KigPlugin {
                     else store.updatePresentation(id, icon = value)
                 if (updated.enabled) refresh(updated, context)
                 open(pages.project(updated))
+            }
+            "editor-icon-file", "editor-author" -> {
+                require(context.inputs["_callerPlugin"] == null)
+                val image = if (action == "editor-icon-file") {
+                    val path = requireNotNull(context.inputs["resourcePath"])
+                    require(path.startsWith("imports/editor-icons/"))
+                    environment.storage.file(path)
+                } else null
+                val project = try { store.updatePresentation(id, image = image, author = context.inputs["author"]) }
+                    finally { image?.delete() }
+                if (project.enabled) refresh(project, context)
+                open(pages.project(project))
             }
             "enable" -> {
                 val project = store.project(id)
@@ -334,11 +364,12 @@ class LuaRuntimePlugin : KigPlugin {
         reviews[pending.token] = pending
         return open(pages.review(pending, store.projects().firstOrNull { it.manifest.id == pending.manifest.id }))
     }
-    private fun create(name: String): PluginOutcome {
-        require(name.length in 1..64)
+    private fun create(name: String, id: String = "local.plugin.p${UUID.randomUUID().toString().take(8)}",
+        author: String = ""): PluginOutcome {
+        require(name.length in 1..64 && author.length <= 120 && store.projects().none { it.manifest.id == id })
         val draft = environment.storage.directory("new/${UUID.randomUUID()}")
-        val id = "tool-${UUID.randomUUID().toString().take(8)}"
-        draft.resolve("manifest.json").writeText(buildJsonObject { put("id", id); put("name", name); put("version", "0.1.0"); put("permissions", JsonArray(emptyList())) }.toString(), Charsets.UTF_8)
+        draft.resolve("manifest.json").writeText(buildJsonObject { put("id", id); put("name", name); put("version", "0.1.0")
+            put("author", author); put("permissions", JsonArray(emptyList())) }.toString(), Charsets.UTF_8)
         draft.resolve("main.lua").writeText("return {\n  contributions = function(ctx) return {} end,\n  pages = function(ctx) return {} end,\n  execute = function(action, ctx) return {type='message', text='完成'} end\n}\n", Charsets.UTF_8)
         return try { open(pages.project(store.confirm(store.stage(draft), enabled = false))) }
         finally { draft.deleteRecursively() }

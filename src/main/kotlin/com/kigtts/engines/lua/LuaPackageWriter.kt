@@ -2,6 +2,8 @@ package com.kigtts.engines.lua
 
 import com.kigtts.plugin.api.PLUGIN_API_VERSION
 import com.kigtts.plugin.api.PluginEnvironment
+import com.kigtts.plugin.api.AppCommand
+import com.kigtts.plugin.api.AppReply
 import kotlinx.serialization.json.*
 import java.io.File
 import java.security.KeyFactory
@@ -15,7 +17,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 internal class LuaPackageWriter(private val environment: PluginEnvironment, private val sources: LuaSourceStore) {
-    fun write(project: LuaProject, development: Boolean = false): File {
+    suspend fun write(project: LuaProject, development: Boolean = false): File {
         sources.verify(project)
         val source = sources.code(project.manifest.id)
         val immutable = requireNotNull(environment.assets.parentFile)
@@ -51,11 +53,16 @@ internal class LuaPackageWriter(private val environment: PluginEnvironment, priv
             put("license", "MIT")
             put("capabilities", JsonArray((metadata.permissions + setOf("ui", "resources")).sorted().map(::JsonPrimitive)))
             put("permissionPurposes", JsonObject(metadata.permissionPurposes.mapValues { JsonPrimitive(it.value) }))
+            if (metadata.author.isNotBlank()) put("author", metadata.author)
             metadata.icon?.let { icon -> put("icon", buildJsonObject { put("symbol", icon) }) }
+            metadata.iconPath?.let { path ->
+                val signedPath = "assets/lua-project/$path"
+                require(payload[signedPath]?.isFile == true)
+                put("icon", buildJsonObject { put("path", signedPath) })
+            }
             put("files", JsonObject(payload.mapValues { (_, file) -> JsonPrimitive(sha256(file)) }))
         }.toString().toByteArray(Charsets.UTF_8)
-        val signer = publisher()
-        val signature = Signature.getInstance("SHA256withRSA").apply { initSign(signer.private); update(raw) }.sign()
+        val (publicKey, signature) = sign(metadata.id, raw)
         val output = directory.resolve("${metadata.id}-$codeNumber.kigplugin")
         val temp = File.createTempFile("pack-", ".part", directory)
         try {
@@ -66,7 +73,7 @@ internal class LuaPackageWriter(private val environment: PluginEnvironment, priv
                     archive.closeEntry()
                 }
                 entry("plugin.json", raw)
-                entry("signature/public.der", signer.public.encoded)
+                entry("signature/public.der", publicKey)
                 entry("signature/manifest.sig", signature)
                 payload.forEach { (path, file) ->
                     archive.putNextEntry(ZipEntry(path))
@@ -87,6 +94,21 @@ internal class LuaPackageWriter(private val environment: PluginEnvironment, priv
                 && it.name.startsWith("${metadata.id}-") }.forEach(File::delete)
             return output
         } finally { temp.delete() }
+    }
+
+    private suspend fun sign(id: String, raw: ByteArray): Pair<ByteArray, ByteArray> {
+        val coder = java.util.Base64.getEncoder()
+        val reply = environment.appBroker?.request(AppCommand.ManagedCall(id, "editor-signing", buildJsonObject {
+            put("manifest", coder.encodeToString(raw))
+        }))
+        if (reply is AppReply.Failure) throw IllegalStateException(reply.message)
+        if (reply is AppReply.Data && reply.value["default"]?.jsonPrimitive?.booleanOrNull != true) {
+            val decoder = java.util.Base64.getDecoder()
+            return decoder.decode(reply.value.getValue("publicKey").jsonPrimitive.content) to
+                decoder.decode(reply.value.getValue("signature").jsonPrimitive.content)
+        }
+        val signer = publisher()
+        return signer.public.encoded to Signature.getInstance("SHA256withRSA").apply { initSign(signer.private); update(raw) }.sign()
     }
 
     private fun publisher(): KeyPair {

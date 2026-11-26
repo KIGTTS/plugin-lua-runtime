@@ -7,6 +7,7 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
     private fun projectHeader(project: LuaProject, opens: Boolean = false) = ManagementItem(
         project.manifest.id, project.manifest.name, if (project.error.isEmpty()) "Lua · v${project.manifest.version}" else copy("dialog.project_failed"),
         PluginIcon.TEXT, symbol = project.manifest.icon ?: "code",
+        image = project.manifest.iconPath?.let { PluginResource("projects/${project.manifest.id}/code/$it", "runtime.lua") },
         primaryAction = if (opens) "project/${project.manifest.id}" else null)
 
     fun manager(projects: List<LuaProject>) = PluginPage("manager", copy("title"), listOf(
@@ -16,8 +17,6 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
     fun project(project: LuaProject) = PluginPage("project/${project.manifest.id}", project.manifest.name, listOf(
         PageBlock.Group(copy("tool"), listOf(
             PageBlock.Actions(listOf(PageAction("debug/${project.manifest.id}", copy("debugBuild"), PluginIcon.SETTINGS))),
-            PageBlock.Actions(listOf(PageAction("rename/${project.manifest.id}", copy("dialog.name"), PluginIcon.EDIT),
-                PageAction("icon/${project.manifest.id}", copy("dialog.icon"), PluginIcon.IMAGE))),
             PageBlock.Actions(listOf(PageAction("files/${project.manifest.id}", copy("files"), PluginIcon.MENU),
                 PageAction("test/${project.manifest.id}", copy("test"), PluginIcon.TEXT),
                 PageAction("export/${project.manifest.id}", copy("export"), PluginIcon.EXPORT),
