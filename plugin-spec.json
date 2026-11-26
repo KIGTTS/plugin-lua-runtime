@@ -1,10 +1,10 @@
 {
   "id": "runtime.lua",
   "name": "插件编辑器",
-  "version": "0.9.10",
-  "versionCode": 14,
+  "version": "0.9.11",
+  "versionCode": 15,
   "entryClass": "com.kigtts.engines.lua.LuaRuntimePlugin",
-  "apiVersion": 34,
+  "apiVersion": 38,
   "minSdk": 26,
   "runtime": "android-dex",
   "license": "MIT",

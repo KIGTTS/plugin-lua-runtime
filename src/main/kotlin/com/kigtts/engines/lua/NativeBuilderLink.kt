@@ -9,8 +9,9 @@ import kotlinx.serialization.json.*
 
 internal object NativeBuilderLink {
     private const val ID = "tools.native-builder"
-    private const val PACKAGE = "tools.native-builder-0.8.5.kigplugin"
-    private const val HASH = "a85c5012779722ec55627524bd680ae47743507c5071fdc5d0956451bf826331"
+    private const val VERSION = "0.8.7"
+    private const val PACKAGE = "tools.native-builder-$VERSION.kigplugin"
+    private const val HASH = "0f4c0017f5e285336fb2ee77312595dbdffe2197f504af865cf5837638703333"
     private const val PUBLISHER = "b5927c76c21539ef99352707c215b3ce48f3fed937a6f995d39a3c677a052ab5"
     private const val PENDING_IMPORT = "config/native-project-import.txt"
 
@@ -41,14 +42,14 @@ internal object NativeBuilderLink {
     private suspend fun isReady(broker: com.kigtts.plugin.api.AppBroker): Boolean {
         val catalog = (broker.request(AppCommand.Describe) as? AppReply.Data)?.value?.get("plugins") as? JsonArray
         val installed = catalog?.mapNotNull { it as? JsonObject }?.firstOrNull { it["id"]?.jsonPrimitive?.content == ID }
-        return (installed?.get("versionCode")?.jsonPrimitive?.intOrNull ?: 0) >= 6 &&
+        return (installed?.get("versionCode")?.jsonPrimitive?.intOrNull ?: 0) >= 8 &&
             installed?.get("enabled")?.jsonPrimitive?.booleanOrNull == true &&
             installed["publisherSha256"]?.jsonPrimitive?.contentOrNull == PUBLISHER
     }
 
     private suspend fun download(environment: PluginEnvironment, action: String): PluginOutcome {
         val path = "downloads/native-$action/$PACKAGE"
-        environment.download("https://github.com/KIGTTS/plugin-native-builder/releases/download/v0.8.5/$PACKAGE", path, HASH)
+        environment.download("https://github.com/KIGTTS/plugin-native-builder/releases/download/v$VERSION/$PACKAGE", path, HASH)
         return PluginOutcome.InstallPackage(PluginResource(path))
     }
 }

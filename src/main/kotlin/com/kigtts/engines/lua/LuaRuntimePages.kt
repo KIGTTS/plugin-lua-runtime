@@ -4,13 +4,15 @@ import com.kigtts.plugin.api.*
 
 internal class LuaRuntimePages(private val text: (String, Map<String, String>) -> String) {
     private fun copy(key: String, vararg values: Pair<String, String>) = text(key, values.toMap())
+    private fun projectHeader(project: LuaProject, opens: Boolean = false) = ManagementItem(
+        project.manifest.id, project.manifest.name, if (project.error.isEmpty()) "Lua · v${project.manifest.version}" else copy("dialog.project_failed"),
+        PluginIcon.TEXT, symbol = project.manifest.icon ?: "code",
+        primaryAction = if (opens) "project/${project.manifest.id}" else null)
+
     fun manager(projects: List<LuaProject>) = PluginPage("manager", copy("title"), listOf(
         PageBlock.Group(copy("tools"), listOf(PageBlock.Actions(listOf(
             PageAction("choose", copy("import"), PluginIcon.ADD), PageAction("create", copy("new"), PluginIcon.EDIT))))),
-    ), ManagementList("lua-projects", projects.map { project ->
-        ManagementItem(project.manifest.id, project.manifest.name, if (project.error.isEmpty()) "Lua · ${project.manifest.version}" else copy("dialog.project_failed"), PluginIcon.TEXT, symbol = project.manifest.icon,
-            primaryAction = "project/${project.manifest.id}")
-    }, emptyText = copy("empty")))
+    ), ManagementList("lua-projects", projects.map { projectHeader(it, opens = true) }, emptyText = copy("empty")))
     fun project(project: LuaProject) = PluginPage("project/${project.manifest.id}", project.manifest.name, listOf(
         PageBlock.Group(copy("tool"), listOf(
             PageBlock.Actions(listOf(PageAction("debug/${project.manifest.id}", copy("debugBuild"), PluginIcon.SETTINGS))),
@@ -22,7 +24,7 @@ internal class LuaRuntimePages(private val text: (String, Map<String, String>) -
                 PageAction("delete/${project.manifest.id}", copy("delete"), PluginIcon.CLOSE))),
         )),
         PageBlock.Group(copy("permissions"), listOf(PageBlock.Text(permissions(project.manifest)))),
-    ) + if (project.error.isNotEmpty()) listOf(PageBlock.Notice(copy("dialog.project_failed"))) else emptyList())
+    ) + (if (project.error.isNotEmpty()) listOf(PageBlock.Notice(copy("dialog.project_failed"))) else emptyList()), header = projectHeader(project))
     fun review(pending: LuaPending, previous: LuaProject?) = PluginPage("review/${pending.token}", if (previous == null) copy("import") else copy("update"), listOf(
         PageBlock.Group(pending.manifest.name, listOf(PageBlock.Text(copy("version", "version" to pending.manifest.version)), PageBlock.Text(permissions(pending.manifest)),
             PageBlock.Notice(copy("review")))),
