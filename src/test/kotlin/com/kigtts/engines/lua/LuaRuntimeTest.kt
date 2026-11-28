@@ -97,7 +97,7 @@ class LuaRuntimeTest {
                 return AppReply.Data(buildJsonObject {
                     put("plugins", buildJsonArray {
                         add(buildJsonObject {
-                            put("id", "tools.native-builder"); put("enabled", true); put("versionCode", 6)
+                            put("id", "tools.native-builder"); put("enabled", true); put("versionCode", 10_000)
                             put("publisherSha256", "b5927c76c21539ef99352707c215b3ce48f3fed937a6f995d39a3c677a052ab5")
                         })
                     })
